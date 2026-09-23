@@ -5,15 +5,17 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
 import { useProxyStore } from '@/stores/useProxyStore'
-import { BaseTabs, EmptyState, Toggle } from '@/components/base'
+import { BaseTabs, Toggle } from '@/components/base'
 import ProvidersView from '@/views/providers/ProvidersView.vue'
+import LogsView from '@/views/logs/LogsView.vue'
+import UsageView from '@/views/usage/UsageView.vue'
+import SettingsView from '@/views/settings/SettingsView.vue'
 
-// 页面入口。供应商不在这里：它不是并列的一页，而是协议 Tab 的上下文——点协议 Tab 就回到供应商页。
-// 日志 / 用量 / 设置按设计文档属 M3，先留入口和占位说明
+// 页面入口。供应商不在这里：它不是并列的一页，而是协议 Tab 的上下文——点协议 Tab 就回到供应商页
 const VIEW_ITEMS = [
-  { key: 'logs', label: '请求日志', pending: '请求日志页在 M3 阶段实现：内存 500 条 + 落盘全量，可按协议与状态码过滤' },
-  { key: 'usage', label: '用量统计', pending: '用量统计页在 M3 阶段实现：按天 / 供应商 / 模型聚合 tokens，模型级单价' },
-  { key: 'settings', label: '设置', pending: '设置页在 M3 阶段实现：端口修改并重启代理、开机自启' }
+  { key: 'logs', label: '请求日志' },
+  { key: 'usage', label: '用量统计' },
+  { key: 'settings', label: '设置' }
 ]
 
 const configStore = useConfigStore()
@@ -22,7 +24,6 @@ const proxyStore = useProxyStore()
 const activeView = ref('providers')
 const activeProtocolId = ref(null)
 
-const currentView = computed(() => VIEW_ITEMS.find((item) => item.key === activeView.value))
 const protocolTabs = computed(() => configStore.protocols.map((protocol) => ({ value: protocol.id, label: protocol.name })))
 
 // 协议 Tab 的显示值：不在供应商页时给 null，Tab 组照旧显示（点它仍能回到供应商页），
@@ -127,9 +128,9 @@ onUnmounted(() => {
       </div>
 
       <ProvidersView v-if="activeView === 'providers'" :protocol-id="activeProtocolId" />
-      <div v-else class="app-placeholder">
-        <EmptyState :title="`${currentView.label}页待实现`" :description="currentView.pending" />
-      </div>
+      <LogsView v-else-if="activeView === 'logs'" />
+      <UsageView v-else-if="activeView === 'usage'" />
+      <SettingsView v-else-if="activeView === 'settings'" />
     </main>
   </div>
 </template>
@@ -252,12 +253,5 @@ onUnmounted(() => {
 .banner-error {
   background: var(--color-error-bg);
   color: var(--color-error);
-}
-
-.app-placeholder {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
 }
 </style>

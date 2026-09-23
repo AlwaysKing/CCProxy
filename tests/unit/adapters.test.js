@@ -102,3 +102,39 @@ test('响应回写：跨 chunk 的多字节文本不受事件切分影响（回�
   const out = JSON.parse(rewriter.rewriteSseEvent(event).toString('utf8').split('\n')[1].slice(5));
   assert.equal(out.delta.text, '跑通');
 });
+
+test('用量提取：anthropic 非流式取顶层 usage', () => {
+  const rewriter = createResponseRewriter('anthropic', 'cnsinda-glm-5.3');
+  rewriter.rewriteBody(Buffer.from(JSON.stringify({ model: 'glm-5.3', usage: { input_tokens: 12, output_tokens: 34 } })));
+  assert.deepEqual(rewriter.getUsage(), { input: 12, output: 34 });
+});
+
+test('用量提取：anthropic 流式起步值被 message_delta 的累计值覆盖（不累加）', () => {
+  const rewriter = createResponseRewriter('anthropic', 'cnsinda-glm-5.3');
+  rewriter.rewriteSseEvent(Buffer.from('event: message_start\ndata: {"type":"message_start","message":{"model":"glm-5.3","usage":{"input_tokens":100,"output_tokens":1}}}\n\n'));
+  assert.deepEqual(rewriter.getUsage(), { input: 100, output: 1 });
+  rewriter.rewriteSseEvent(Buffer.from('event: message_delta\ndata: {"type":"message_delta","delta":{},"usage":{"output_tokens":257}}\n\n'));
+  // message_delta 的 output_tokens 是最终累计值，再乘加就翻倍了
+  assert.deepEqual(rewriter.getUsage(), { input: 100, output: 257 });
+});
+
+test('用量提取：openai 非流式取 usage.prompt/completion_tokens', () => {
+  const rewriter = createResponseRewriter('openai', 'gpt-4o-proxy');
+  rewriter.rewriteBody(Buffer.from(JSON.stringify({ model: 'glm', usage: { prompt_tokens: 9, completion_tokens: 8 } })));
+  assert.deepEqual(rewriter.getUsage(), { input: 9, output: 8 });
+});
+
+test('用量提取：openai 流式只有末帧带 usage 时才取得到', () => {
+  const rewriter = createResponseRewriter('openai', 'gpt-4o-proxy');
+  rewriter.rewriteSseEvent(Buffer.from('data: {"id":"x","choices":[{"delta":{"content":"hi"}}]}\n\n'));
+  assert.equal(rewriter.getUsage(), null);
+  rewriter.rewriteSseEvent(Buffer.from('data: {"id":"x","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":5}}\n\ndata: [DONE]\n\n'));
+  assert.deepEqual(rewriter.getUsage(), { input: 7, output: 5 });
+});
+
+test('用量提取：上游没上报返回 null，上报了 0 是 0——两者要区分', () => {
+  const rewriter = createResponseRewriter('anthropic', 'cnsinda-glm-5.3');
+  assert.equal(rewriter.getUsage(), null);
+  rewriter.rewriteBody(Buffer.from(JSON.stringify({ usage: { input_tokens: 0, output_tokens: 0 } })));
+  assert.deepEqual(rewriter.getUsage(), { input: 0, output: 0 });
+});

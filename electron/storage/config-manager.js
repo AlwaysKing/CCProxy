@@ -19,7 +19,7 @@ const SUPPORTED_PROTOCOLS = [
 function createDefaultConfig() {
   return {
     version: CONFIG_VERSION,
-    settings: { port: DEFAULT_PORT, launchAtLogin: false },
+    settings: { port: DEFAULT_PORT, launchAtLogin: false, pricing: {} },
     protocols: SUPPORTED_PROTOCOLS.map((preset) => ({
       id: preset.id,
       name: preset.name,
@@ -89,6 +89,31 @@ function normalizeMapping(raw, protocolId, providerIds, issues) {
   };
 }
 
+// 单价：模型名 → { input, output }，单位是「每百万 tokens」。这笔数字要直接算出钱，
+// 校验从严：认不出的条目丢掉并记 issue，绝不让 NaN 渗进费用计算
+function normalizePricing(raw, issues) {
+  if (!isPlainObject(raw)) return {};
+  const pricing = {};
+  for (const [model, price] of Object.entries(raw)) {
+    const name = typeof model === 'string' ? model.trim() : '';
+    if (!name) continue;
+    if (!isPlainObject(price)) {
+      issues.push(`模型 ${name} 的单价不是对象，已丢弃`);
+      continue;
+    }
+    const input = Number(price.input);
+    const output = Number(price.output);
+    const inputValid = Number.isFinite(input) && input >= 0;
+    const outputValid = Number.isFinite(output) && output >= 0;
+    if (!inputValid && !outputValid) {
+      issues.push(`模型 ${name} 的单价没有有效的输入/输出价格，已丢弃`);
+      continue;
+    }
+    pricing[name] = { input: inputValid ? input : 0, output: outputValid ? output : 0 };
+  }
+  return pricing;
+}
+
 function buildProtocol(raw, preset, issues) {
   const protocol = {
     id: preset.id,
@@ -153,7 +178,8 @@ function validateConfig(raw) {
     version: CONFIG_VERSION,
     settings: {
       port: portValid ? port : DEFAULT_PORT,
-      launchAtLogin: settings.launchAtLogin === true
+      launchAtLogin: settings.launchAtLogin === true,
+      pricing: normalizePricing(settings.pricing, issues)
     },
     protocols: SUPPORTED_PROTOCOLS.map((preset) => {
       const matched = rawProtocols.find((item) => isPlainObject(item) && item.id === preset.id);

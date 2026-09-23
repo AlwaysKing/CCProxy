@@ -55,11 +55,57 @@ function sendJsonError(res, statusCode, payload) {
   sendJson(res, statusCode, payload);
 }
 
+// 每条请求一个进程内唯一的 id：日志页要拿它当列表 key，而同一毫秒里进来两条请求
+// （并发客户端很常见）时间戳会撞，拿时间戳当 key 会串行
+let requestSeq = 0;
+
+// 统一日志 entry：五个分支（模型列表 / 收体失败 / 识别失败 / 查表失败 / 正常转发）字段必须一致，
+// 否则日志页每个字段都要按分支判空。这里只铺默认值与时间，具体字段由调用点覆盖。
+// outcome 说明这次请求走到哪一步：models（被接管）/ read_failed / detect_failed / rejected / forwarded
+function makeLogEntry(req, startedAt, fields) {
+  requestSeq += 1;
+  return {
+    id: `${startedAt}-${requestSeq}`,
+    timestamp: startedAt,
+    durationMs: Date.now() - startedAt,
+    method: req.method,
+    path: req.url,
+    protocol: null,
+    clientModel: null,
+    matchKind: null,
+    matchedRule: null,
+    providerId: null,
+    providerName: null,
+    realModel: null,
+    statusCode: 0,
+    outcome: 'unknown',
+    errorCode: null,
+    error: null,
+    cancelled: false,
+    tokens: null,
+    detection: null,
+    ...fields
+  };
+}
+
 // 单个请求的完整处理链
 async function handleRequest(req, res, options) {
   const { getConfig, onLog, maxBodyBytes } = options;
   const startedAt = Date.now();
-  const body = await readRequestBody(req, maxBodyBytes);
+
+  // 收体失败（超 64MB 上限、连接中断）也要留下日志 entry：否则这类请求在日志页凭空消失，
+  // 用户只看到 413 却查不到当时发生了什么
+  let body;
+  try {
+    body = await readRequestBody(req, maxBodyBytes);
+  } catch (err) {
+    const statusCode = err.statusCode || 500;
+    sendJsonError(res, statusCode, { error: { type: 'ccproxy_body', message: err.message } });
+    if (onLog) {
+      onLog(makeLogEntry(req, startedAt, { statusCode, outcome: 'read_failed', errorCode: statusCode === 413 ? 'body_too_large' : 'body_read_error', error: err.message }));
+    }
+    return;
+  }
 
   // 模型列表接口由代理接管：不透传上游，按当前激活的映射直接生成响应
   const modelsReq = matchModelsRequest(req.method, req.url);
@@ -67,7 +113,7 @@ async function handleRequest(req, res, options) {
     const protocolId = resolveClientProtocol(req.headers);
     const { status, payload } = buildModelsResponse(getConfig(), protocolId, modelsReq.modelId);
     sendJson(res, status, payload);
-    if (onLog) onLog({ timestamp: startedAt, protocol: protocolId, clientModel: modelsReq.modelId, statusCode: status, durationMs: Date.now() - startedAt, handled: 'models' });
+    if (onLog) onLog(makeLogEntry(req, startedAt, { protocol: protocolId, clientModel: modelsReq.modelId, statusCode: status, outcome: 'models' }));
     return;
   }
 
@@ -76,7 +122,7 @@ async function handleRequest(req, res, options) {
     sendJsonError(res, 400, {
       error: { type: 'ccproxy_detect', message: '无法识别请求所属协议', detail: { scores: detection.scores, reasons: detection.reasons } }
     });
-    if (onLog) onLog({ timestamp: startedAt, protocol: null, clientModel: null, statusCode: 400, durationMs: Date.now() - startedAt, detection });
+    if (onLog) onLog(makeLogEntry(req, startedAt, { statusCode: 400, outcome: 'detect_failed', detection }));
     return;
   }
 
@@ -86,7 +132,7 @@ async function handleRequest(req, res, options) {
   const routing = resolveRouting(config, detection.protocol, clientModel);
   if (routing.error) {
     sendJsonError(res, routing.error.status, { error: { type: routing.error.code, message: routing.error.message } });
-    if (onLog) onLog({ timestamp: startedAt, protocol: detection.protocol, clientModel, statusCode: routing.error.status, durationMs: Date.now() - startedAt, detection });
+    if (onLog) onLog(makeLogEntry(req, startedAt, { protocol: detection.protocol, clientModel, statusCode: routing.error.status, outcome: 'rejected', errorCode: routing.error.code, detection }));
     return;
   }
 
@@ -123,18 +169,25 @@ async function handleRequest(req, res, options) {
     responseRewriter
   });
 
+  // 用量在回写器里攒着（它按协议语义解析过响应体），到这里取一次；
+  // 上游没上报就是 null，与「上报了 0」区分开
   if (onLog) {
-    onLog({
-      timestamp: startedAt,
+    onLog(makeLogEntry(req, startedAt, {
       protocol: detection.protocol,
       clientModel,
+      matchKind: routing.matchKind,
+      matchedRule: routing.mapping.clientModel,
       mappingId: routing.mapping.id,
+      providerId: provider.id,
       providerName: provider.name,
       realModel: routing.realModel,
       statusCode: result.statusCode,
-      durationMs: Date.now() - startedAt,
+      outcome: 'forwarded',
+      cancelled: result.cancelled === true,
+      error: result.error || null,
+      tokens: responseRewriter ? responseRewriter.getUsage() : null,
       detection
-    });
+    }));
   }
 }
 

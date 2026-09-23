@@ -44,18 +44,23 @@ function resolveRouting(config, protocolId, clientModel) {
     usable.push({ mapping, provider });
   }
 
+  // 三轮各记一个 matchKind：请求日志要写「命中规则」，而「是哪一轮命中的」只有这里知道。
+  // 让渲染层从模式串反推（判断含不含 *）等于同一条规则写两份，早晚漂移
   // 第一轮：精确匹配
   let hit = usable.find((e) => e.mapping.clientModel === clientModel);
+  let matchKind = hit ? 'exact' : null;
   // 第二轮：通配，前缀最长者优先
   if (!hit) {
     const wildcards = usable
       .filter((e) => isWildcardPattern(e.mapping.clientModel) && matchMapping(e.mapping, clientModel))
       .sort((a, b) => (b.mapping.clientModel.length - a.mapping.clientModel.length));
     hit = wildcards[0];
+    matchKind = hit ? 'wildcard' : null;
   }
   // 第三轮：兜底
   if (!hit) {
     hit = usable.find((e) => e.mapping.clientModel === '*');
+    matchKind = hit ? 'fallback' : null;
   }
 
   if (!hit) {
@@ -65,6 +70,7 @@ function resolveRouting(config, protocolId, clientModel) {
     protocolId,
     provider: { id: hit.provider.id, name: hit.provider.name, baseUrl: hit.provider.baseUrl, token: hit.provider.token },
     mapping: hit.mapping,
+    matchKind,
     realModel: hit.mapping.realModel
   };
 }

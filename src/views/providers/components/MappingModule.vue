@@ -82,7 +82,7 @@ async function onConfirmDelete() {
       <BaseButton size="sm" @click="onAdd">+ 添加映射</BaseButton>
     </template>
 
-    <table v-if="protocol.mappings.length" class="mapping-table">
+    <table v-if="protocol.mappings.length" class="data-table">
       <thead>
         <tr>
           <th>映射模型</th>
@@ -164,46 +164,8 @@ async function onConfirmDelete() {
 </template>
 
 <style scoped>
-/* 表格在卡片里了，自己不再铺底色和圆角，否则两块灰会叠在一起 */
-.mapping-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.mapping-table th {
-  padding: var(--spacing-sm) var(--spacing-md);
-  text-align: left;
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-medium);
-  color: var(--text-muted);
-  border-bottom: 1px solid var(--border-default);
-}
-
-/* 首列贴住卡片内边距、末列贴住右边：表头和模块标题、头部按钮才在一条竖线上 */
-.mapping-table th:first-child,
-.mapping-table td:first-child {
-  padding-left: 0;
-}
-
-.mapping-table th:last-child,
-.mapping-table td:last-child {
-  padding-right: 0;
-}
-
-.mapping-table td {
-  padding: var(--spacing-sm) var(--spacing-md);
-  font-size: var(--font-size-sm);
-  border-bottom: 1px solid var(--border-default);
-}
-
-.mapping-table tbody tr:last-child td {
-  border-bottom: none;
-}
-
-.mapping-table tbody tr:hover {
-  background-color: var(--bg-hover);
-}
-
+/* 表格骨架（内边距、分隔线、悬停）在 global.css 的 .data-table 里，这里只放本模块独有的格子。
+   表格在卡片里，自己不再铺底色和圆角，否则两块灰会叠在一起 */
 .row-off {
   opacity: 0.5;
 }

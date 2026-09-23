@@ -101,3 +101,10 @@ test('配置里没有该协议时报 404', () => {
   assert.ok(r.error);
   assert.equal(r.error.status, 404);
 });
+
+test('matchKind 标明命中轮次：精确 exact / 通配 wildcard / 兜底 fallback', () => {
+  // 界面的「精确/通配/兜底」徽章直接读这个字段，不在这里给全，渲染层就得自己从模式串反推
+  assert.equal(resolveRouting(buildConfig(), 'anthropic', 'claude-sonnet-4').matchKind, 'exact');
+  assert.equal(resolveRouting(buildConfig(), 'anthropic', 'claude-opus-9').matchKind, 'wildcard');
+  assert.equal(resolveRouting(buildConfig(), 'anthropic', 'totally-other-model').matchKind, 'fallback');
+});

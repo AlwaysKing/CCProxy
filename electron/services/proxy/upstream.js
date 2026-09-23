@@ -54,6 +54,8 @@ function forwardRequest(options) {
     const parsed = new URL(url);
     const transport = parsed.protocol === 'https:' ? https : http;
     let settled = false;
+    // 客户端主动取消（而不是上游失败）：结果里要带出去，用量统计不能把它算成上游错误
+    let cancelled = false;
     let responseTimer = null;
     let firstByteTimer = null;
 
@@ -76,7 +78,7 @@ function forwardRequest(options) {
       } else {
         clientRes.destroy();
       }
-      finish({ statusCode: 502, error: err.message });
+      finish({ statusCode: 502, error: err.message, cancelled });
     };
 
     const upstreamReq = transport.request(
@@ -174,6 +176,7 @@ function forwardRequest(options) {
     // 客户端提前断开（取消请求）时中止上游请求，避免连接悬挂与上游继续生成计费
     clientRes.on('close', () => {
       if (settled) return;
+      cancelled = true;
       upstreamReq.destroy(new Error('客户端提前断开'));
     });
 

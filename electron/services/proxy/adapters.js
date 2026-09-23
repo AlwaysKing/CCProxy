@@ -17,6 +17,26 @@ function stripInboundCredentials(headers) {
   return headers;
 }
 
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+// 用量计数字段可能缺、可能是 null、可能上游给了字符串：认不出的都当「没上报」。
+// 只有输入/输出两项——用量页按这两项聚合与计价，缓存类 tokens 暂不纳入
+function countTokens(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+// 把一次上报里认得的字段并进累计器。后到的覆盖先到的，不累加：
+// anthropic 的 output 在 message_start 里是起步值、在 message_delta 里是最终累计值，
+// 累加会把 output 算成好几倍
+function mergeUsage(target, next) {
+  if (!next) return;
+  if (next.input !== null) target.input = next.input;
+  if (next.output !== null) target.output = next.output;
+}
+
 const PROTOCOL_ADAPTERS = {
   anthropic: {
     protocol: 'anthropic',
@@ -33,6 +53,16 @@ const PROTOCOL_ADAPTERS = {
       if (payload && payload.type === 'message_start' && payload.message && typeof payload.message.model === 'string') {
         payload.message.model = clientModel;
       }
+    },
+    // 用量：非流式在顶层 usage；流式里输入在 message_start.message.usage，
+    // 输出的最终值在 message_delta.usage
+    extractUsage(payload) {
+      if (!isPlainObject(payload)) return null;
+      const source = payload.type === 'message_start' && isPlainObject(payload.message) && isPlainObject(payload.message.usage)
+        ? payload.message.usage
+        : (isPlainObject(payload.usage) ? payload.usage : null);
+      if (!source) return null;
+      return { input: countTokens(source.input_tokens), output: countTokens(source.output_tokens) };
     }
   },
   openai: {
@@ -48,6 +78,12 @@ const PROTOCOL_ADAPTERS = {
     // 流式响应里每个 chunk 顶层都带 model
     rewriteStreamDataModel(payload, clientModel) {
       if (payload && typeof payload.model === 'string') payload.model = clientModel;
+    },
+    // 用量只在顶层 usage（prompt/completion_tokens）。流式默认不带上报——
+    // 这里不替客户端补 stream_options.include_usage：那是改发往上游的请求语义，不只是观察
+    extractUsage(payload) {
+      if (!isPlainObject(payload) || !isPlainObject(payload.usage)) return null;
+      return { input: countTokens(payload.usage.prompt_tokens), output: countTokens(payload.usage.completion_tokens) };
     }
   }
 };
@@ -60,13 +96,17 @@ function getAdapter(protocolId) {
 
 // 生成响应回写器：非流式改 JSON 顶层 model，流式逐 SSE 事件改 data 行。
 // 非 JSON（如上游错误页）或没有 model 字段的一律原样透传，绝不因为回写失败弄坏响应。
+// 回写器同时兼管用量观察：它是唯一按协议语义解析响应体的地方（非流式整体、流式逐事件），
+// 让 upstream 去认 message_start / usage 等于把协议细节漏进管道层
 function createResponseRewriter(protocolId, clientModel) {
   const adapter = getAdapter(protocolId);
+  const usage = { input: null, output: null };
   return {
     // 非流式：整体一个 JSON，顶层 model 回写
     rewriteBody(buffer) {
       try {
         const payload = JSON.parse(buffer.toString('utf8'));
+        mergeUsage(usage, adapter.extractUsage(payload));
         if (payload && typeof payload === 'object' && typeof payload.model === 'string' && payload.model !== clientModel) {
           payload.model = clientModel;
           return Buffer.from(JSON.stringify(payload), 'utf8');
@@ -81,11 +121,16 @@ function createResponseRewriter(protocolId, clientModel) {
         if (!lines[i].startsWith('data:')) continue;
         try {
           const payload = JSON.parse(lines[i].slice(5));
+          mergeUsage(usage, adapter.extractUsage(payload));
           adapter.rewriteStreamDataModel(payload, clientModel);
           lines[i] = `data: ${JSON.stringify(payload)}`;
         } catch { /* 非 JSON 的 data 行（如 [DONE]）原样保留 */ }
       }
       return Buffer.from(lines.join('\n'), 'utf8');
+    },
+    // 一个字段都没收到时返回 null：日志与用量页要能区分「上游没上报」和「上报了 0」
+    getUsage() {
+      return usage.input === null && usage.output === null ? null : { input: usage.input, output: usage.output };
     }
   };
 }

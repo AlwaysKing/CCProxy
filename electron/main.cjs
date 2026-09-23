@@ -7,6 +7,7 @@ const path = require('path');
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const logger = require('./logger');
 const { createConfigManager } = require('./storage/config-manager');
+const { createRequestLog } = require('./storage/request-log');
 const { createLocalProxy } = require('./services/proxy');
 const { fetchUpstreamModels } = require('./services/proxy/fetch-models');
 const tray = require('./tray');
@@ -19,6 +20,7 @@ const RENDERER_INDEX = path.join(__dirname, '..', 'dist', 'index.html');
 let mainWindow = null;
 let isQuitting = false;
 let configManager = null;
+let requestLog = null;
 let config = null;
 let configIssues = [];
 let configRecovered = false;
@@ -106,8 +108,32 @@ async function toggleProxy() {
   return proxyStatus.status === 'running' ? stopProxy() : startProxy();
 }
 
-// 所有配置变更的唯一出口：落盘 → 更新内存 → 刷托盘 → 通知界面
+async function restartProxy() {
+  await stopProxy();
+  return startProxy();
+}
+
+// 配置变更的副作用：端口改了要按新端口重启（否则界面写着新端口、实际还监听着旧端口），
+// 开机自启要同步给系统。放在这里而不是渲染层——托盘、设置页或以后别处改配置都走同一条路
+function applyConfigEffects(previous, next) {
+  if (!previous || previous.settings.launchAtLogin !== next.settings.launchAtLogin) {
+    try {
+      app.setLoginItemSettings({ openAtLogin: next.settings.launchAtLogin === true });
+    } catch (error) {
+      logger.warn('[App] 同步开机自启失败', { error: error.message });
+    }
+  }
+  const portChanged = !previous || previous.settings.port !== next.settings.port;
+  // 只有正在跑才需要重启；停着的话下次启动自然读新端口
+  if (portChanged && proxyStatus.status === 'running') {
+    logger.info('[Proxy] 端口变更，按新端口重启', { port: next.settings.port });
+    restartProxy().catch((error) => logger.error('[Proxy] 端口变更后重启失败', { error: error.message }));
+  }
+}
+
+// 所有配置变更的唯一出口：落盘 → 更新内存 → 应用副作用 → 刷托盘 → 通知界面
 function applyConfig(nextConfig) {
+  const previous = config;
   const saved = configManager.save(nextConfig);
   config = saved.config;
   configIssues = saved.issues;
@@ -115,6 +141,7 @@ function applyConfig(nextConfig) {
   // 重建横幅必须退场，否则后续的校验问题会被错并进「已重建」里
   configRecovered = false;
   configBackupPath = null;
+  applyConfigEffects(previous, config);
   tray.refresh();
   broadcast('config-changed', {
     config,
@@ -193,8 +220,7 @@ ipcMain.handle('stop-proxy', async () => {
 
 ipcMain.handle('restart-proxy', async () => {
   try {
-    await stopProxy();
-    const next = await startProxy();
+    const next = await restartProxy();
     return { success: next.status === 'running', ...next };
   } catch (error) {
     return { success: false, error: error.message };
@@ -209,6 +235,53 @@ ipcMain.handle('fetch-provider-models', async (event, payload) => {
     return await fetchUpstreamModels(payload || {});
   } catch (error) {
     return { ok: false, error: error.message };
+  }
+});
+
+// ============================================
+// Request Log / Usage IPC Handlers
+// ============================================
+ipcMain.handle('get-logs', async () => {
+  try {
+    return { success: true, logs: requestLog.list() };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 聚合在主进程做：日文件可能有几十天、几万行，全量塞给渲染层再算不合适。
+// 当前单价一并传进去：费用每次读都按最新单价重算，界面上改完单价刷新即可看到历史跟着变
+ipcMain.handle('get-usage', async (event, range) => {
+  try {
+    return { success: true, ...requestLog.usage({ ...(range || {}), pricing: config.settings.pricing }) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('get-storage-stats', async () => {
+  try {
+    return { success: true, ...requestLog.stats() };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('clear-logs', async () => {
+  try {
+    requestLog.clearLogs();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('clear-usage', async () => {
+  try {
+    requestLog.clearUsage();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
   }
 });
 
@@ -246,9 +319,19 @@ async function bootstrap() {
   }
   logger.info('[Config] 已加载', { path: configManager.getPath(), port: config.settings.port, issues: configIssues.length });
 
+  requestLog = createRequestLog({ dir: configManager.getDir() });
+
+  // 启动时按配置同步一次副作用：用户可能在系统设置里关掉了自启，而配置里还写着 true
+  applyConfigEffects(null, config);
+
   proxy = createLocalProxy({
     getConfig: () => config,
-    onLog: (entry) => logger.info('[Proxy] 请求', entry)
+    // 请求日志由 requestLog 落盘并推给界面；不再往 app.log 里灌一份——
+    // 那份日志没有轮转，逐请求写会把它撑爆，而且两处记录早晚对不上
+    onLog: (entry) => {
+      requestLog.record(entry);
+      broadcast('log-appended', entry);
+    }
   });
 
   createWindow();

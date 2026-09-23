@@ -46,6 +46,68 @@ textarea {
   -webkit-user-select: text;
 }
 
+/* ==================== 数据表格 ==================== */
+
+/* 映射表、日志表、用量表长得一样：表头小字次级色、行悬停、最后一行不画分隔线。
+   放全局而不是每个页面各抄一份——三处里改一处忘另两处，表格就会一处一个样。
+   首尾列不留内边距，表头才能和卡片外的标题、右上角按钮对在同一条竖线上 */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.data-table th {
+  padding: var(--spacing-sm) var(--spacing-md);
+  text-align: left;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-default);
+  white-space: nowrap;
+}
+
+.data-table td {
+  padding: var(--spacing-sm) var(--spacing-md);
+  font-size: var(--font-size-sm);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.data-table th:first-child,
+.data-table td:first-child {
+  padding-left: 0;
+}
+
+.data-table th:last-child,
+.data-table td:last-child {
+  padding-right: 0;
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table tbody tr:hover {
+  background-color: var(--bg-hover);
+}
+
+/* 数字列右对齐 + 等宽：纵向扫一眼就能比大小，位数不一样也不会左右跳 */
+.data-table .col-num {
+  text-align: right;
+  font-family: var(--font-family-mono);
+}
+
+/* ==================== 页面容器 ==================== */
+
+/* 日志页 / 用量页 / 设置页里的面板卡片：面板色 + 描边 + 圆角 + 一档内边距。
+   跟 ModuleCard 的卡片是两回事——那张卡还带着卡片外的标题与右上角主操作，
+   这里的头是筛选条或说明文字，形状对不上，硬套反而要往 ModuleCard 里加开关 */
+.page-card {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+}
+
 /* 键盘走到哪就在哪画橙环，鼠标点击不画 */
 *:focus-visible {
   outline: 2px solid var(--accent-primary);

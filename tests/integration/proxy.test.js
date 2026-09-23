@@ -491,3 +491,181 @@ test('start/stop/start 同一 tick 三连：第三次 start resolve 时是真的
   });
   await stopServer(recheck);
 });
+
+// 日志 entry 在响应结束后才写，request() resolve 与 onLog 之间没有先后保证，轮询等一小段
+function waitUntil(predicate, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve, reject) => {
+    const tick = () => {
+      if (predicate()) return resolve();
+      if (Date.now() > deadline) return reject(new Error('等待条件超时'));
+      setTimeout(tick, 10);
+    };
+    tick();
+  });
+}
+
+function baseConfig(port, mockPort) {
+  return {
+    settings: { port },
+    protocols: [{
+      id: 'anthropic', name: 'Anthropic', enabled: true,
+      providers: [{ id: 'p1', name: 'mock上游', enabled: true, baseUrl: `http://127.0.0.1:${mockPort}`, token: 'sk-real-token', models: ['glm-4.6'] }],
+      mappings: [
+        { id: 'm1', enabled: true, clientModel: 'cnsinda-glm-4.6', providerId: 'p1', realModel: 'glm-4.6' },
+        { id: 'm9', enabled: true, clientModel: '*', providerId: 'p1', realModel: 'glm-4.6' }
+      ]
+    }]
+  };
+}
+
+test('端到端：流式 usage 落进日志 entry，message_delta 的累计值不翻倍', async () => {
+  const mock = await startMockServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('event: message_start\ndata: {"type":"message_start","message":{"model":"glm-4.6","usage":{"input_tokens":120,"output_tokens":1}}}\n\n');
+      res.write('event: message_delta\ndata: {"type":"message_delta","delta":{},"usage":{"output_tokens":88}}\n\n');
+      res.end();
+    });
+  });
+
+  const entries = [];
+  const proxy = createLocalProxy({ getConfig: () => baseConfig(0, mock.port), onLog: (entry) => entries.push(entry) });
+  const { port } = await proxy.start();
+
+  const resp = await request(port, 'POST', '/v1/messages', {
+    'content-type': 'application/json',
+    'x-api-key': 'sk-fake',
+    'anthropic-version': '2023-06-01',
+    'accept': 'text/event-stream'
+  }, claudeBody('cnsinda-glm-4.6', true));
+
+  assert.equal(resp.status, 200);
+  await waitUntil(() => entries.length === 1);
+  const entry = entries[0];
+  assert.equal(entry.outcome, 'forwarded');
+  assert.equal(entry.statusCode, 200);
+  assert.equal(entry.matchKind, 'exact');
+  assert.equal(entry.matchedRule, 'cnsinda-glm-4.6');
+  assert.equal(entry.providerId, 'p1');
+  assert.equal(entry.realModel, 'glm-4.6');
+  assert.deepEqual(entry.tokens, { input: 120, output: 88 });
+  assert.ok(entry.id); // 列表 key 用
+  assert.ok(entry.detection && entry.detection.scores);
+
+  await proxy.stop();
+  await stopServer(mock.server);
+});
+
+test('端到端：客户端中途断开记为取消，不污染上游错误率', async () => {
+  // 上游开了流但不结束：模拟生成到一半用户按了 Esc
+  const mock = await startMockServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('event: message_start\ndata: {"type":"message_start"}\n\n');
+    });
+  });
+
+  const entries = [];
+  const proxy = createLocalProxy({ getConfig: () => baseConfig(0, mock.port), onLog: (entry) => entries.push(entry) });
+  const { port } = await proxy.start();
+
+  const clientReq = http.request({
+    hostname: '127.0.0.1', port, method: 'POST', path: '/v1/messages',
+    headers: { 'content-type': 'application/json', 'x-api-key': 'sk-fake', 'anthropic-version': '2023-06-01', accept: 'text/event-stream' }
+  }, (res) => {
+    res.on('data', () => clientReq.destroy());
+  });
+  clientReq.on('error', () => {}); // destroy 触发的连接重置是预期行为，吞掉
+  clientReq.end(claudeBody('cnsinda-glm-4.6', true));
+
+  await waitUntil(() => entries.length === 1);
+  assert.equal(entries[0].outcome, 'forwarded');
+  assert.equal(entries[0].cancelled, true);
+  assert.equal(entries[0].statusCode, 502);
+
+  await proxy.stop();
+  mock.server.closeAllConnections();
+  await stopServer(mock.server);
+});
+
+test('端到端：上游连不上记为失败（非取消），错误信息带进 entry', async () => {
+  const entries = [];
+  const config = {
+    settings: { port: 0 },
+    protocols: [{
+      id: 'openai', name: 'OpenAI', enabled: true,
+      providers: [{ id: 'q1', name: '不存在', enabled: true, baseUrl: 'http://127.0.0.1:9', token: 't', models: ['x'] }],
+      mappings: [{ id: 'm1', enabled: true, clientModel: 'gpt-4o', providerId: 'q1', realModel: 'x' }]
+    }]
+  };
+  const proxy = createLocalProxy({ getConfig: () => config, onLog: (entry) => entries.push(entry) });
+  const { port } = await proxy.start();
+
+  const resp = await request(port, 'POST', '/v1/chat/completions', { 'content-type': 'application/json', authorization: 'Bearer x' }, openaiBody('gpt-4o'));
+  assert.equal(resp.status, 502);
+  await waitUntil(() => entries.length === 1);
+  assert.equal(entries[0].cancelled, false);
+  assert.equal(entries[0].statusCode, 502);
+  assert.ok(entries[0].error);
+
+  await proxy.stop();
+});
+
+test('端到端：模型列表接管与识别失败各自留下可判读的 entry', async () => {
+  const entries = [];
+  const config = {
+    settings: { port: 0 },
+    protocols: [{
+      id: 'anthropic', name: 'Anthropic', enabled: true,
+      providers: [{ id: 'p1', name: 'mock', enabled: true, baseUrl: 'http://127.0.0.1:9', token: 't', models: ['glm-4.6'] }],
+      mappings: [{ id: 'm1', enabled: true, clientModel: 'claude-*', providerId: 'p1', realModel: 'glm-4.6' }]
+    }]
+  };
+  const proxy = createLocalProxy({ getConfig: () => config, onLog: (entry) => entries.push(entry) });
+  const { port } = await proxy.start();
+
+  // 模型列表：代理自己接管，outcome = models
+  const models = await request(port, 'GET', '/v1/models', { 'x-api-key': 'sk-fake', 'anthropic-version': '2023-06-01' });
+  assert.equal(models.status, 200);
+
+  // 一个既不像 anthropic 也不像 openai 的请求：outcome = detect_failed，带打分明细
+  const weird = await request(port, 'POST', '/whatever', { 'content-type': 'text/plain' }, Buffer.from('plain text'));
+  assert.equal(weird.status, 400);
+
+  await waitUntil(() => entries.length === 2);
+  assert.equal(entries.find((e) => e.outcome === 'models').statusCode, 200);
+  const failed = entries.find((e) => e.outcome === 'detect_failed');
+  assert.equal(failed.statusCode, 400);
+  assert.ok(failed.detection.scores && Array.isArray(failed.detection.reasons));
+
+  await proxy.stop();
+});
+
+test('端到端：请求体超上限记 read_failed，日志页能查到这次 413', async () => {
+  const entries = [];
+  const config = {
+    settings: { port: 0 },
+    protocols: [{
+      id: 'openai', name: 'OpenAI', enabled: true,
+      providers: [{ id: 'q1', name: 'mock', enabled: true, baseUrl: 'http://127.0.0.1:9', token: 't', models: ['x'] }],
+      mappings: [{ id: 'm1', enabled: true, clientModel: 'gpt-4o', providerId: 'q1', realModel: 'x' }]
+    }]
+  };
+  const proxy = createLocalProxy({ getConfig: () => config, onLog: (entry) => entries.push(entry), maxBodyBytes: 1024 });
+  const { port } = await proxy.start();
+
+  const resp = await request(port, 'POST', '/v1/chat/completions', { 'content-type': 'application/json' }, Buffer.alloc(4096));
+  assert.equal(resp.status, 413);
+  await waitUntil(() => entries.length === 1);
+  assert.equal(entries[0].outcome, 'read_failed');
+  assert.equal(entries[0].statusCode, 413);
+  assert.equal(entries[0].errorCode, 'body_too_large');
+  assert.ok(entries[0].error);
+
+  await proxy.stop();
+});

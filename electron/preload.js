@@ -21,11 +21,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopProxy: () => ipcRenderer.invoke('stop-proxy'),
   restartProxy: () => ipcRenderer.invoke('restart-proxy'),
   fetchProviderModels: (payload) => ipcRenderer.invoke('fetch-provider-models', payload),
+  getLogs: () => ipcRenderer.invoke('get-logs'),
+  getUsage: (range) => ipcRenderer.invoke('get-usage', range),
+  getStorageStats: () => ipcRenderer.invoke('get-storage-stats'),
+  clearLogs: () => ipcRenderer.invoke('clear-logs'),
+  clearUsage: () => ipcRenderer.invoke('clear-usage'),
   log: (...args) => ipcRenderer.send('log', args),
   platform: process.platform
 });
 
 contextBridge.exposeInMainWorld('electronEvents', {
   onConfigChanged: (callback) => subscribe('config-changed', callback),
-  onProxyStatusChanged: (callback) => subscribe('proxy-status-changed', callback)
+  onProxyStatusChanged: (callback) => subscribe('proxy-status-changed', callback),
+  onLogAppended: (callback) => subscribe('log-appended', callback)
 });
