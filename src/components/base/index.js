@@ -1,0 +1,15 @@
+// 基础组件统一导出。比 CCGUI 多导出 AppSelect（它那边漏了，导致按路径 import 与按 index import 两种写法混用）；
+// BaseTabs / ConfirmDialog / ModuleCard 是 CCProxy 自己加的，CCGUI 没有对应件
+export { default as BaseButton } from './BaseButton.vue'
+export { default as BaseInput } from './BaseInput.vue'
+export { default as BaseCard } from './BaseCard.vue'
+export { default as BaseDialog } from './BaseDialog.vue'
+export { default as Toggle } from './Toggle.vue'
+export { default as FormField } from './FormField.vue'
+export { default as Badge } from './Badge.vue'
+export { default as EmptyState } from './EmptyState.vue'
+export { default as IconButton } from './IconButton.vue'
+export { default as AppSelect } from './AppSelect.vue'
+export { default as BaseTabs } from './BaseTabs.vue'
+export { default as ConfirmDialog } from './ConfirmDialog.vue'
+export { default as ModuleCard } from './ModuleCard.vue'

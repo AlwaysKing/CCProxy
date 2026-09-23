@@ -1,0 +1,150 @@
+/**
+ * CCProxy CSS Variables
+ *
+ * 灰阶取自 CC Switch 的 dark 主题（作者仓库 farion1231/cc-switch src/index.css，
+ * Tailwind/shadcn 的 HSL 三元组换算成 hex），因为设计文档写明「界面仿照 CC Switch」：
+ * 画布 #1D1D20 < 卡片/面板 #27272B < 次级面 #2C2C30 < 边框 #3A3A40，亮的顺序不打乱。
+ * 与 CCGUI 的差异：这套灰阶、语义色的亮度和拆分（见各处批注）、以及上面那几处注释。
+ * 主色沿用 CCGUI 的橙 #F97316，对齐 CC Switch 的橙「+」按钮，不是它 dark 主题里的蓝。
+ *
+ * 变量名的分工（沿用 CCGUI 的语义，只是取值换成上面那套）：
+ * - --bg-primary  抬起来的面板：弹窗、模块卡片（CC Switch 里 card 与 popover 同色，这里也同色）
+ * - --bg-secondary 同面板色：输入框、Tab 容器、chips —— 它们靠 1px 描边成形（CC Switch 的输入框就是透明底+描边）
+ * - --bg-tertiary  比面板再亮一档：卡片、徽标、次按钮
+ * - --bg-hover / --bg-active 悬停与按下
+ * 画布色不在这里定义：它硬编码在 global.css 的 body 上，和 CCGUI 硬编码 #111315 是同一个习惯
+ * （因为 --bg-primary 在 CCGUI 里就是「抬起来的面板」而不是画布）。
+ */
+
+:root {
+  /* ==================== 色彩系统 ==================== */
+
+  /* 背景色。填充和描边是两套阶梯，各走各的：CC Switch 只有一个 24% 灰，既当描边又当悬停填充，
+     照搬会让 --bg-hover 和 --border-default 同名同值，以后改一处忘一处就漂了。
+     这里把填充单独退/进一档（21% / 26%），描边保持 CC Switch 的原值 */
+  --bg-primary: #27272B;
+  --bg-secondary: #27272B;
+  --bg-tertiary: #2C2C30;
+  --bg-hover: #333338;
+  --bg-active: #3F3F46;
+
+  /* 文字色 */
+  --text-primary: #FAFAFA;
+  --text-secondary: #A1A1AA;
+  /* 三级字压面板色只有 5.0:1；再暗就跌破 WCAG AA 的 4.5:1（11px 表头、真实模型名、顶栏端口都用它） */
+  --text-muted: #95959D;
+  --text-inverse: #18181B;
+
+  /* 强调色 */
+  --accent-primary: #F97316;
+  --accent-hover: #FB923C;
+  --accent-active: #EA580C;
+  --accent-light: rgba(249, 115, 22, 0.1);
+  /* 橙色当文字用（下拉选中项）要亮一档：--accent-primary 压在橙色底纹上只有 4.2:1 */
+  --accent-text: #FB923C;
+
+  /* 边框色 */
+  --border-default: #3A3A40;
+  --border-light: #4A4A52;
+  --border-hover: #5A5A62;
+  --border-focus: #F97316;
+
+  /* 状态色 - 成功 */
+  --color-success: #22C55E;
+  --color-success-hover: #16A34A;
+  --color-success-bg: rgba(34, 197, 94, 0.1);
+
+  /* 状态色 - 错误。同一个红要当两种东西用，分开取：
+     - --color-error  深色底上的文字与描边（横幅、表单校验、Badge）——要够亮才过 AA
+     - --color-error-solid  实心红底（删除按钮）——要够深，压在上面的白字才过 AA
+     Tailwind 的 red-500 两种用途只够一种（当文字 4.0:1、当白字底 3.8:1，两头都不到 4.5:1） */
+  --color-error: #F87171;
+  --color-error-bg: rgba(239, 68, 68, 0.1);
+  --color-error-solid: #DC2626;
+  --color-error-solid-hover: #B91C1C;
+
+  /* 状态色 - 警告 */
+  --color-warning: #F59E0B;
+  --color-warning-hover: #D97706;
+  --color-warning-bg: rgba(245, 158, 11, 0.1);
+
+  /* 状态色 - 信息（蓝是「状态」不是「主操作」，橙色留给主操作）。
+     当文字用所以要够亮；--color-info-border 是当前启用那行的描边 */
+  --color-info: #60A5FA;
+  --color-info-hover: #2563EB;
+  --color-info-bg: rgba(59, 130, 246, 0.1);
+  --color-info-border: rgba(96, 165, 250, 0.35);
+
+  /* 代码/语法色 */
+  --code-bg: #0D0D0D;
+  --code-inline-bg: #2C2C30;
+  --code-border: #3A3A40;
+
+  /* ==================== 间距系统 ==================== */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 24px;
+  --spacing-2xl: 32px;
+
+  /* ==================== 圆角系统 ==================== */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
+
+  /* ==================== 字体系统 ==================== */
+
+  /* 字体族 */
+  --font-family-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  --font-family-mono: 'SF Mono', 'Fira Code', 'Consolas', 'Monaco', monospace;
+
+  /* 字号 */
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-base: 14px;
+  --font-size-md: 15px;
+  --font-size-lg: 16px;
+  --font-size-xl: 18px;
+  --font-size-2xl: 24px;
+
+  /* 字重 */
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* 行高 */
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.75;
+
+  /* ==================== 阴影系统 ==================== */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.5);
+  --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.6);
+
+  /* ==================== 过渡动画 ==================== */
+  --transition-fast: 0.1s ease;
+  --transition-normal: 0.2s ease;
+  --transition-slow: 0.3s ease;
+
+  /* ==================== Z-Index 层级 ==================== */
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-modal: 1200;
+  --z-tooltip: 1100;
+  --z-toast: 1200;
+
+  /* ==================== 布局相关 ==================== */
+
+  /* 头部高度 */
+  --header-height: 48px;
+
+  /* 输入区域最小高度 */
+  --input-min-height: 120px;
+}
