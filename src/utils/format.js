@@ -56,12 +56,3 @@ export function formatBytes(bytes) {
   return `${(value / 1024 / 1024 / 1024).toFixed(2)}GB`
 }
 
-// 费用：单价按「每百万 tokens」配，单日费用常常不到 1，固定两位会把小额抹成 0.00。
-// 这里不写货币符号——单价是用户自己填的数，币种只有他自己知道
-export function formatMoney(value) {
-  const number = Number(value)
-  if (!Number.isFinite(number)) return '—'
-  if (number === 0) return '0'
-  if (number < 1) return number.toFixed(4)
-  return number.toFixed(2)
-}

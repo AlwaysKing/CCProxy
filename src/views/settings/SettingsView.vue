@@ -1,15 +1,17 @@
 <script setup>
-// 设置页：端口、开机自启、数据存储。
+// 设置页：端口、开机自启、客户端目录、数据存储。
 // 端口保存后由主进程判断要不要按新端口重启（applyConfig 的副作用）——这里不发重启指令，
 // 托盘或别处改配置走的也是同一条路，两边行为必须一致
 import { computed, onMounted, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
 import { useProxyStore } from '@/stores/useProxyStore'
-import { BaseButton, BaseInput, ConfirmDialog, Toggle } from '@/components/base'
+import { useClientDirsStore } from '@/stores/useClientDirsStore'
+import { BaseButton, BaseInput, ConfirmDialog, IconButton, Toggle } from '@/components/base'
 import { formatBytes } from '@/utils/format'
 
 const configStore = useConfigStore()
 const proxyStore = useProxyStore()
+const clientDirsStore = useClientDirsStore()
 
 const portDraft = ref('')
 const notice = ref('')
@@ -37,6 +39,8 @@ async function onSavePort() {
   const ok = await configStore.updateSetting('port', Number(portDraft.value))
   if (!ok) notice.value = configStore.error || '保存失败'
   else if (proxyStore.status === 'running') notice.value = '已保存，代理正在按新端口重启'
+  // 目录检查是拿当前端口判的，端口一改结论就过期了，重扫一遍
+  if (ok) await clientDirsStore.reload()
 }
 
 const launchAtLogin = computed(() => configStore.config?.settings.launchAtLogin === true)
@@ -52,6 +56,28 @@ async function loadStats() {
   if (result.success) stats.value = result
 }
 
+// 客户端配置目录：列表与检查结果都在 clientDirsStore（顶栏徽标也吃这一份）。
+// App 壳启动时 init 过一次，这里只在挂载时刷新一遍——挂载和启动之间用户可能刚改过目录
+const expectedAddress = computed(() => clientDirsStore.expectedAddress)
+const dirBusy = computed(() => clientDirsStore.busy)
+const dirNotice = computed(() => clientDirsStore.notice)
+
+const DIR_GROUP_META = [
+  { kind: 'claude', label: 'Claude' },
+  { kind: 'codex', label: 'Codex' }
+]
+
+const groupedDirs = computed(() => {
+  const groups = { claude: [], codex: [] }
+  for (const entry of clientDirsStore.builtin) groups[entry.kind]?.push({ ...entry, source: '内置' })
+  for (const entry of clientDirsStore.manual) groups[entry.kind]?.push({ ...entry, source: '手动' })
+  return groups
+})
+
+const onAddDir = () => clientDirsStore.add()
+const onRemoveDir = (entry) => clientDirsStore.remove(entry)
+const onApplyDir = (entry) => clientDirsStore.applyConfig(entry)
+
 // 两种数据的清理语义不同（见 request-log 的注释），所以分两个入口而不是一个「清空数据」
 const STORAGE_ROWS = computed(() => [
   {
@@ -64,7 +90,7 @@ const STORAGE_ROWS = computed(() => [
   {
     key: 'usage',
     name: '用量记录',
-    desc: '转发到上游的请求的 tokens 记账，按天分文件；清掉后统计与费用从零开始',
+    desc: '转发到上游的请求的 tokens 记账，按天分文件；清掉后统计从零开始',
     files: stats.value?.usage?.files ?? 0,
     bytes: stats.value?.usage?.bytes ?? 0
   }
@@ -72,7 +98,7 @@ const STORAGE_ROWS = computed(() => [
 
 const CLEAR_META = {
   logs: { title: '清空请求日志', description: '会删掉落盘的全部历史日志，不影响用量统计。内存里的最近 500 条会在下次打开日志页时重新加载。确定清空？' },
-  usage: { title: '清空用量记录', description: '会删掉全部用量历史，之后统计与费用从零开始，请求日志不受影响。确定清空？' }
+  usage: { title: '清空用量记录', description: '会删掉全部用量历史，之后统计从零开始，请求日志不受影响。确定清空？' }
 }
 
 async function onClear() {
@@ -90,7 +116,10 @@ async function onClear() {
   }
 }
 
-onMounted(loadStats)
+onMounted(() => {
+  loadStats()
+  clientDirsStore.reload()
+})
 </script>
 
 <template>
@@ -105,10 +134,10 @@ onMounted(loadStats)
           <p v-if="portError && portChanged" class="setting-error">{{ portError }}</p>
         </div>
         <div class="setting-control">
-          <BaseInput v-model="portDraft" type="number" class="port-input" :error="!!portError && portChanged" />
+          <BaseInput v-model="portDraft" type="number" size="sm" class="port-input" :error="!!portError && portChanged" />
           <BaseButton
             variant="primary"
-            size="md"
+            size="sm"
             :disabled="!portChanged || !portValid"
             :loading="configStore.saving"
             @click="onSavePort"
@@ -130,6 +159,50 @@ onMounted(loadStats)
     </div>
 
     <div class="page-card">
+      <div class="dirs-head">
+        <div class="setting-info">
+          <span class="setting-name">客户端配置目录</span>
+          <span class="setting-desc">扫描到的 Claude / Codex 配置目录；内置位置自动发现，手动添加的目录失效后会被自动移除</span>
+          <span v-if="expectedAddress" class="setting-desc">检查口径：指向 <code>{{ expectedAddress }}</code> 且 token 与 CCProxy 一致；不一致的行可点「应用」写入</span>
+        </div>
+        <BaseButton size="sm" :loading="dirBusy" @click="onAddDir">+ 添加目录</BaseButton>
+      </div>
+
+      <div v-for="group in DIR_GROUP_META" :key="group.kind" class="dirs-group">
+        <span class="dirs-group-title">{{ group.label }}</span>
+        <div v-if="groupedDirs[group.kind].length" class="dirs-list">
+          <div v-for="entry in groupedDirs[group.kind]" :key="entry.path" class="dirs-item">
+            <div class="dirs-row">
+              <span class="dirs-path" :title="entry.path">{{ entry.path }}</span>
+              <span class="dirs-tag">{{ entry.source }}</span>
+              <IconButton v-if="entry.source === '手动'" class="dirs-remove" size="sm" danger title="移除该目录" @click="onRemoveDir(entry)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="3 6 5 6 21 6" />
+                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                  <path d="M10 11v6M14 11v6" />
+                  <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                </svg>
+              </IconButton>
+              <!-- 只有不一致才出现，直接点了把 CCProxy 的地址与 token 写进去。
+                   差在哪放在悬停提示里：列表上不铺检查结果，但点之前得能看明白要改什么 -->
+              <BaseButton
+                v-if="entry.status !== 'ok'"
+                class="dirs-apply"
+                size="sm"
+                :disabled="dirBusy"
+                :title="entry.problems?.join('\n') || ''"
+                @click="onApplyDir(entry)"
+              >应用</BaseButton>
+            </div>
+          </div>
+        </div>
+        <span v-else class="dirs-empty">未发现</span>
+      </div>
+
+      <p v-if="dirNotice" class="dirs-notice">{{ dirNotice }}</p>
+    </div>
+
+    <div class="page-card">
       <div v-for="row in STORAGE_ROWS" :key="row.key" class="setting-row">
         <div class="setting-info">
           <span class="setting-name">{{ row.name }}</span>
@@ -139,7 +212,7 @@ onMounted(loadStats)
           <span class="storage-size">{{ row.files ? `${row.files} 个文件 · ${formatBytes(row.bytes)}` : '暂无数据' }}</span>
           <BaseButton
             variant="secondary"
-            size="md"
+            size="sm"
             :disabled="!row.files"
             @click="confirmingClear = row.key"
           >
@@ -213,6 +286,11 @@ onMounted(loadStats)
   font-size: var(--font-size-sm);
 }
 
+.setting-desc code {
+  font-family: var(--font-family-mono);
+  color: var(--text-secondary);
+}
+
 .setting-error {
   margin-top: var(--spacing-xs);
   color: var(--color-error);
@@ -224,6 +302,91 @@ onMounted(loadStats)
   align-items: center;
   gap: var(--spacing-md);
   flex-shrink: 0;
+}
+
+/* 客户端目录卡：标题行左边说明右边添加按钮，下面 claude/codex 各一组 */
+.dirs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-lg);
+  padding: var(--spacing-md) 0;
+}
+
+.dirs-group {
+  padding: var(--spacing-sm) 0;
+}
+
+.dirs-group + .dirs-group,
+.dirs-group + .dirs-notice {
+  border-top: 1px solid var(--border-default);
+}
+
+.dirs-group-title {
+  display: block;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  margin-bottom: var(--spacing-xs);
+}
+
+.dirs-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.dirs-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: 2px 0;
+}
+
+/* 两个按钮都靠右：先出现的那一个吃掉剩余空间，于是「应用」永远贴行尾。
+   只有其中一个存在时也各自靠右，不会因为按钮多少而左右跳 */
+.dirs-remove,
+.dirs-apply {
+  margin-left: auto;
+}
+
+/* 目录行是 xs 字号的紧凑行，「应用」用 btn-sm 会把行高撑出一截，
+   压回与行内标签（内置/手动）同一档 */
+.dirs-apply {
+  padding: 1px 8px;
+  font-size: var(--font-size-xs);
+}
+
+.dirs-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-primary);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dirs-tag {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.dirs-empty {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.dirs-notice {
+  margin: var(--spacing-sm) 0 0;
+  padding-top: var(--spacing-sm);
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
 }
 
 .port-input {

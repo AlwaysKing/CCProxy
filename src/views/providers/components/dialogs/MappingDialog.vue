@@ -37,8 +37,13 @@ const providerOptions = computed(() =>
 const selectedProvider = computed(
   () => props.protocol.providers.find((provider) => provider.id === form.value.providerId) || null
 )
+// 供应商的模型是配置条目，这里只关心名字——真实模型名进映射，属性留在供应商那边
+function modelNames(provider) {
+  return (provider?.models ?? []).map((model) => model.name)
+}
+
 const modelOptions = computed(() => {
-  const models = selectedProvider.value?.models ?? []
+  const models = modelNames(selectedProvider.value)
   const options = models.map((model) => ({ value: model, label: model }))
   // 编辑回填的旧值可能已不在该供应商的模型列表里（后来改过列表）：保留成一项并标出来，
   // 不然下拉显示成空的，用户一保存这个值就没了
@@ -62,7 +67,7 @@ watch(
           providerId: props.mapping.providerId,
           realModel: props.mapping.realModel
         }
-      : { clientModel: '', providerId: first?.id ?? '', realModel: first?.models[0] ?? '' }
+      : { clientModel: '', providerId: first?.id ?? '', realModel: modelNames(first)[0] ?? '' }
   }
 )
 
@@ -72,7 +77,7 @@ watch(
   () => form.value.providerId,
   (id, prevId) => {
     if (!id || !prevId || id === prevId) return
-    const models = props.protocol.providers.find((provider) => provider.id === id)?.models ?? []
+    const models = modelNames(props.protocol.providers.find((provider) => provider.id === id))
     if (!models.includes(form.value.realModel)) form.value.realModel = models[0] ?? ''
   }
 )

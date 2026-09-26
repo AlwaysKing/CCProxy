@@ -1,5 +1,4 @@
 // 用量 store：聚合在主进程做（要读几十天日文件），这里只管记住区间、取回结果。
-// 费用也由主进程按当前单价算好——单价存在配置里，只有它拿得到最新的一份
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { logger } from '@/utils/logger'
@@ -12,7 +11,7 @@ export const useUsageStore = defineStore('usage', () => {
   const byModel = ref([])
   const isLoading = ref(false)
   const error = ref(null)
-  // 区间就一个「最近几天」，默认今天；存下来是为了改完单价能按同一区间重取
+  // 区间就一个「最近几天」，默认今天
   const range = ref({ days: 1 })
 
   async function load(nextRange) {

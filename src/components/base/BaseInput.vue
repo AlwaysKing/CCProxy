@@ -107,6 +107,19 @@ function handleEnter(event) {
   color: var(--text-muted);
 }
 
+/* number 输入框隐藏原生步进箭头：浅灰的系统控件和深色主题不搭，
+   键盘上下键、滚轮仍可调值，功能不受影响 */
+.base-input::-webkit-outer-spin-button,
+.base-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.base-input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
 /* 尺寸 */
 .input-sm {
   padding: 6px 10px;

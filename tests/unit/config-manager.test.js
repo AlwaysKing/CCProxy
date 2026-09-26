@@ -1,4 +1,4 @@
-// 配置管理单测：默认配置、原子写、损坏回落、校验归一化
+// 配置管理单测：默认配置、原子写、损坏回落、校验归一化（含模型配置条目）
 'use strict';
 
 const test = require('node:test');
@@ -114,6 +114,129 @@ test('校验：映射指向不存在的供应商时被丢弃', () => {
   });
   assert.equal(result.config.protocols[0].mappings.length, 0);
   assert.ok(result.issues.some((issue) => issue.includes('ghost')));
+});
+
+test('校验：模型条目新旧两种写法都认，旧字符串升级成配置条目', () => {
+  const result = validateConfig({
+    protocols: [{
+      id: 'openai', name: 'OpenAI', enabled: true,
+      providers: [provider('p1', [
+        'glm-5.3',
+        { name: 'gpt-5.5', contextWindow: 400000, maxContextWindow: 1024000, inputModalities: ['text', 'image'], reasoning: true }
+      ])],
+      mappings: []
+    }]
+  });
+  const models = result.config.protocols[1].providers[0].models;
+  assert.deepEqual(models, [
+    // 旧格式只带得回名字，窗口与能力留空，界面上就是「没配」
+    { name: 'glm-5.3' },
+    { name: 'gpt-5.5', contextWindow: 400000, maxContextWindow: 1024000, inputModalities: ['text', 'image'], reasoning: true }
+  ]);
+});
+
+test('校验：模型的非法字段只丢字段，缺名与重名的条目才整个丢掉', () => {
+  const result = validateConfig({
+    protocols: [{
+      id: 'anthropic', name: 'Anthropic', enabled: true,
+      providers: [provider('p1', [
+        // 窗口非法、模态里混了白名单外的值、reasoning 不是布尔：字段级丢弃
+        { name: 'ok', contextWindow: 'abc', maxContextWindow: 0, inputModalities: ['text', 'video'], reasoning: 'yes' },
+        // 宽松强转也要挡住：true 与数组都不是合法的窗口值
+        { name: 'typed', contextWindow: true, maxContextWindow: [400000] },
+        // null 与窗口字段同口径，当「没配」处理，不弹警告
+        { name: 'nulled', inputModalities: null, reasoning: null },
+        { name: '   ' },
+        null,
+        // 重名：丢后者，留下先出现的那个，用窗口值把「留的是哪条」锁住
+        { name: 'dup', contextWindow: 111 },
+        { name: 'dup', contextWindow: 222 }
+      ])],
+      mappings: []
+    }]
+  });
+  const models = result.config.protocols[0].providers[0].models;
+  assert.deepEqual(models, [
+    { name: 'ok', inputModalities: ['text'] },
+    { name: 'typed' },
+    { name: 'nulled' },
+    { name: 'dup', contextWindow: 111 }
+  ]);
+  // null 当留空：不该为它记 issue
+  assert.ok(!result.issues.some((issue) => issue.includes('nulled')));
+  assert.ok(result.issues.some((issue) => issue.includes('contextWindow')));
+  assert.ok(result.issues.some((issue) => issue.includes('maxContextWindow')));
+  assert.ok(result.issues.some((issue) => issue.includes('inputModalities')));
+  assert.ok(result.issues.some((issue) => issue.includes('reasoning')));
+  assert.ok(result.issues.some((issue) => issue.includes('缺少 name')));
+  assert.ok(result.issues.some((issue) => issue.includes('非法模型条目')));
+  assert.ok(result.issues.some((issue) => issue.includes('重复模型 dup')));
+});
+
+test('校验：窗口留空不写回字段，重复模态去重', () => {
+  const result = validateConfig({
+    protocols: [{
+      id: 'openai', name: 'OpenAI', enabled: true,
+      providers: [provider('p1', [{ name: 'a', contextWindow: '', maxContextWindow: null, inputModalities: ['text', 'text', 'image'] }])],
+      mappings: []
+    }]
+  });
+  const model = result.config.protocols[1].providers[0].models[0];
+  assert.deepEqual(model, { name: 'a', inputModalities: ['text', 'image'] });
+});
+
+test('校验：clientDirs 只收 id/kind/path 齐全且路径为绝对路径的条目，重复路径丢后者', () => {
+  const good = { id: 'd1', kind: 'claude', path: '/Users/x/.claude-x' };
+  const result = validateConfig({
+    settings: {
+      clientDirs: [
+        good,
+        // 相对路径：扫描按原样去找会随工作目录漂移，直接丢
+        { id: 'd2', kind: 'codex', path: 'relative/.codex' },
+        // kind 白名单外
+        { id: 'd3', kind: 'gemini', path: '/Users/x/.gemini' },
+        // 缺 id
+        { kind: 'claude', path: '/Users/x/a' },
+        // 与 good 同路径：重复
+        { id: 'd4', kind: 'claude', path: '/Users/x/.claude-x' },
+        null
+      ]
+    }
+  });
+  assert.deepEqual(result.config.settings.clientDirs, [good]);
+  assert.ok(result.issues.some((issue) => issue.includes('绝对路径')));
+  assert.ok(result.issues.some((issue) => issue.includes('kind 非法')));
+  assert.ok(result.issues.some((issue) => issue.includes('缺少 id')));
+  assert.ok(result.issues.some((issue) => issue.includes('重复目录')));
+});
+
+test('校验：clientDirs 不是数组重置为空，缺省也为空', () => {
+  const broken = validateConfig({ settings: { clientDirs: 'nope' } });
+  assert.deepEqual(broken.config.settings.clientDirs, []);
+  assert.ok(broken.issues.some((issue) => issue.includes('clientDirs')));
+
+  const absent = validateConfig({ protocols: [] });
+  assert.deepEqual(absent.config.settings.clientDirs, []);
+});
+
+test('保存后 clientDirs 完整往返', (t) => {
+  const { manager } = makeManager(t);
+  const config = createDefaultConfig();
+  config.settings.clientDirs = [{ id: 'd9', kind: 'codex', path: '/Users/x/codex-config' }];
+  manager.save(config);
+  const reloaded = manager.load();
+  assert.deepEqual(reloaded.config.settings.clientDirs, [{ id: 'd9', kind: 'codex', path: '/Users/x/codex-config' }]);
+});
+
+test('校验：clientToken 只留字符串，非法值清成空串', () => {
+  const kept = validateConfig({ settings: { clientToken: '  t_abc  ' } });
+  assert.equal(kept.config.settings.clientToken, 't_abc');
+
+  // 生成放在主进程启动阶段做（校验是纯函数，这里生成就没法单测了）
+  for (const bad of [undefined, null, 42, { a: 1 }]) {
+    assert.equal(validateConfig({ settings: { clientToken: bad } }).config.settings.clientToken, '');
+  }
+  assert.equal(validateConfig({}).config.settings.clientToken, '');
 });
 
 test('校验：配置里残留的 activeProviderId 不再保留', () => {

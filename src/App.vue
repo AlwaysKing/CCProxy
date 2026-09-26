@@ -5,6 +5,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
 import { useProxyStore } from '@/stores/useProxyStore'
+import { useClientDirsStore } from '@/stores/useClientDirsStore'
 import { BaseTabs, Toggle } from '@/components/base'
 import ProvidersView from '@/views/providers/ProvidersView.vue'
 import LogsView from '@/views/logs/LogsView.vue'
@@ -20,6 +21,7 @@ const VIEW_ITEMS = [
 
 const configStore = useConfigStore()
 const proxyStore = useProxyStore()
+const clientDirsStore = useClientDirsStore()
 
 const activeView = ref('providers')
 const activeProtocolId = ref(null)
@@ -69,6 +71,9 @@ onMounted(async () => {
   unsubscribes.push(window.electronEvents.onConfigChanged((payload) => configStore.applyState(payload)))
   unsubscribes.push(window.electronEvents.onProxyStatusChanged((payload) => proxyStore.apply(payload)))
   await Promise.all([configStore.init(), proxyStore.init()])
+  // 启动就扫一遍客户端目录：有和 CCProxy 不一致的，顶栏常驻一个感叹号提醒，
+  // 点它去设置页处理。配置/代理先就位，检查的口径（端口、token）才是最终的
+  clientDirsStore.init()
 })
 
 onUnmounted(() => {
@@ -83,6 +88,19 @@ onUnmounted(() => {
       <span class="app-title">CCProxy</span>
 
       <div class="app-topbar-right">
+        <!-- 客户端目录有和 CCProxy 不一致的：常驻一个感叹号，点它去设置页处理。
+             跟横幅不同，它不是一件事的播报而是「有一处要管」的状态，修好自动消失，
+             所以做成安静的圆点挂在切换控件前面，不抢横幅的戏 -->
+        <button
+          v-if="clientDirsStore.problemCount"
+          type="button"
+          class="app-dir-alert"
+          :title="`${clientDirsStore.problemCount} 个客户端配置目录与 CCProxy 不一致，点击去处理`"
+          @click="activeView = 'settings'"
+        >
+          !
+        </button>
+
         <!-- 协议 Tab 是「当前在配哪个协议」的主上下文，每个页面都在，放在页面入口前面：
              先定协议，再看是哪一页。点它就回到供应商页——供应商没有自己的入口了。
              它和右边的页面入口是两种层级的切换，中间划一条竖线；没有协议时整组一起藏，
@@ -162,6 +180,27 @@ onUnmounted(() => {
   font-size: var(--font-size-md);
   font-weight: var(--font-weight-semibold);
   color: var(--text-primary);
+}
+
+/* 客户端目录的告警圆点：小小一枚常驻提醒，只靠颜色和位置说话，不带文字 */
+.app-dir-alert {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--color-warning);
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.app-dir-alert:hover {
+  border-color: var(--color-warning-hover);
+  color: var(--color-warning-hover);
 }
 
 /* 页面入口与协议 Tab 之间的竖线：两者是不同层级的切换，不能糊成一片 */

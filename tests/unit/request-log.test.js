@@ -1,4 +1,4 @@
-// 请求日志存储单测：环形缓冲上限、两份落盘的分目录、用量聚合与计价、清理语义互不影响
+// 请求日志存储单测：环形缓冲上限、两份落盘的分目录、用量聚合、清理语义互不影响
 'use strict';
 
 const test = require('node:test');
@@ -84,35 +84,12 @@ test('聚合按天 / 协议 / 供应商 / 模型分桶，取消不算失败', (t
   assert.equal(anthropic.output, 50);
   const providerB = usage.byProvider.find((b) => b.key === 'B');
   assert.equal(providerB.requests, 2);
-  // 模型维度把两个协议的 glm-4.6 合在一起：单价按模型名配，不该按协议拆开
+  // 模型维度把两个协议的 glm-4.6 合在一起：同一个模型走哪个协议都是同一个模型
   const glm = usage.byModel.find((b) => b.key === 'glm-4.6');
   assert.equal(glm.requests, 2);
   assert.equal(glm.input, 110);
   assert.equal(usage.byDay.length, 1);
   assert.equal(usage.byDay[0].key, dateKey(now));
-});
-
-test('计价按当前单价重算，没配单价的模型不产费用', (t) => {
-  const { log } = makeLog(t);
-  const now = Date.now();
-  log.record(forwardedEntry({ timestamp: now, realModel: 'glm-4.6', tokens: { input: 1000000, output: 2000000 } }));
-  log.record(forwardedEntry({ timestamp: now, realModel: 'kimi', tokens: { input: 100, output: 100 } }));
-
-  const priced = log.usage({ pricing: { 'glm-4.6': { input: 3, output: 15 } } });
-  const glm = priced.byModel.find((b) => b.key === 'glm-4.6');
-  assert.equal(glm.priced, 1);
-  assert.equal(glm.cost, 3 * 1 + 15 * 2); // 1M 输入 + 2M 输出
-  const kimi = priced.byModel.find((b) => b.key === 'kimi');
-  assert.equal(kimi.priced, 0);
-  assert.equal(kimi.cost, 0);
-  // 汇总桶是部分的：两条请求里只有一条配了单价
-  assert.equal(priced.totals.priced, 1);
-  assert.equal(priced.totals.requests, 2);
-
-  // 不传单价就没有费用字段可言（priced 为 0），但 tokens 照常聚合
-  const unpriced = log.usage();
-  assert.equal(unpriced.totals.priced, 0);
-  assert.equal(unpriced.totals.input, 1000100);
 });
 
 test('days=1 只含今天，跨天记录落在各自的日文件里', (t) => {

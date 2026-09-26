@@ -6,10 +6,13 @@
 const path = require('path');
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const logger = require('./logger');
-const { createConfigManager } = require('./storage/config-manager');
+const { createConfigManager, createConfigId } = require('./storage/config-manager');
 const { createRequestLog } = require('./storage/request-log');
 const { createLocalProxy } = require('./services/proxy');
 const { fetchUpstreamModels } = require('./services/proxy/fetch-models');
+const { builtinDirs, detectDirKind, scanClientDirs } = require('./services/clients/dirs');
+const { inspectClientConfig } = require('./services/clients/check');
+const { applyClientConfig } = require('./services/clients/apply');
 const tray = require('./tray');
 
 // 未打包（开发态）一律加载 Vite dev server，改渲染层代码即时热更新；
@@ -190,6 +193,104 @@ ipcMain.handle('save-config', async (event, nextConfig) => {
 });
 
 // ============================================
+// Client Config Dirs IPC Handlers
+// ============================================
+
+// 手动目录的增删、扫描剔除、kind 矫正都改的是配置，统一从这条口落盘：
+// applyConfig 会顺带广播给界面，设置页不用自己猜配置变成了什么样
+function persistClientDirs(nextDirs) {
+  const draft = JSON.parse(JSON.stringify(config));
+  draft.settings.clientDirs = nextDirs;
+  applyConfig(draft);
+}
+
+ipcMain.handle('get-client-dirs', async () => {
+  try {
+    const manual = config.settings.clientDirs;
+    const scan = scanClientDirs({ manual });
+    // 剔除与矫正都要落盘；扫描保持原顺序，整体序列化比对就够用
+    if (JSON.stringify(scan.manual) !== JSON.stringify(manual)) {
+      persistClientDirs(scan.manual);
+    }
+    // 检查结果跟着目录一起返回：界面拿到的每条目录自带「有没有指向 CCProxy」的状态。
+    // 期望地址由当前端口与客户端 token 推出，所以端口或 token 一变，下一次取列表就是新结果
+    const context = { port: config.settings.port, token: config.settings.clientToken };
+    const inspect = (entry) => ({ ...entry, ...inspectClientConfig(entry.path, entry.kind, context) });
+    return {
+      success: true,
+      builtin: scan.builtin.map(inspect),
+      manual: scan.manual.map(inspect),
+      dropped: scan.dropped,
+      expectedAddress: `http://127.0.0.1:${config.settings.port}`
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('pick-client-dir', async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: '选择客户端配置目录',
+      properties: ['openDirectory']
+    });
+    return { success: true, path: result.canceled ? null : result.filePaths[0] ?? null };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('add-client-dir', async (event, dirPath) => {
+  try {
+    const target = typeof dirPath === 'string' ? path.normalize(dirPath.trim()) : '';
+    if (!target) return { success: false, error: '没有选择目录' };
+    const kind = detectDirKind(target);
+    if (!kind) return { success: false, error: '不是 Claude 或 Codex 的配置目录' };
+    // 内置位置是常量，有效时会自己出现在列表里，手动存一份只会重复
+    if (builtinDirs().some((entry) => path.normalize(entry.path) === target)) {
+      return { success: false, error: '这是内置扫描位置，不用手动添加' };
+    }
+    if (config.settings.clientDirs.some((entry) => path.normalize(entry.path) === target)) {
+      return { success: false, error: '该目录已在列表中' };
+    }
+    persistClientDirs([...config.settings.clientDirs, { id: createConfigId('d'), kind, path: target }]);
+    logger.info('[ClientDirs] 已添加手动目录', { kind, path: target });
+    return { success: true, kind };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 把 CCProxy 的地址与 token 写进该目录的配置文件。只认扫描出来的目录：
+// 渲染层传什么路径就写什么的话，这条口就成了「往任意文件写内容」
+ipcMain.handle('apply-client-dir', async (event, dirPath) => {
+  try {
+    const target = typeof dirPath === 'string' ? path.normalize(dirPath.trim()) : '';
+    const scan = scanClientDirs({ manual: config.settings.clientDirs });
+    const entry = [...scan.builtin, ...scan.manual].find((item) => path.normalize(item.path) === target);
+    if (!entry) return { success: false, error: '该目录不在扫描结果里，请先刷新' };
+    const result = applyClientConfig(entry.path, entry.kind, {
+      port: config.settings.port,
+      token: config.settings.clientToken
+    });
+    logger.info('[ClientDirs] 已写入 CCProxy 配置', { kind: entry.kind, file: result.file, backupPath: result.backupPath });
+    return { success: true, ...result };
+  } catch (error) {
+    logger.error('[ClientDirs] 写入失败', { error: error.message });
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('remove-client-dir', async (event, dirId) => {
+  try {
+    persistClientDirs(config.settings.clientDirs.filter((entry) => entry.id !== dirId));
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// ============================================
 // Local Proxy IPC Handlers
 // ============================================
 ipcMain.handle('get-proxy-status', async () => {
@@ -249,11 +350,10 @@ ipcMain.handle('get-logs', async () => {
   }
 });
 
-// 聚合在主进程做：日文件可能有几十天、几万行，全量塞给渲染层再算不合适。
-// 当前单价一并传进去：费用每次读都按最新单价重算，界面上改完单价刷新即可看到历史跟着变
+// 聚合在主进程做：日文件可能有几十天、几万行，全量塞给渲染层再算不合适
 ipcMain.handle('get-usage', async (event, range) => {
   try {
-    return { success: true, ...requestLog.usage({ ...(range || {}), pricing: config.settings.pricing }) };
+    return { success: true, ...requestLog.usage(range || {}) };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -304,17 +404,23 @@ async function bootstrap() {
   if (loaded.recovered) {
     logger.warn('[Config] 配置已损坏并重建', { backupPath: loaded.backupPath, reason: loaded.issues.join('；') });
   }
+  // 客户端 token 是配置的必需项（检查客户端配置要用，之后校验入站请求也要用）。
+  // 在内存里补一个并落盘：不落盘的话每次启动都会换一个新的，客户端那边填过也对不上
+  const needsClientToken = !config.settings.clientToken;
+  if (needsClientToken) {
+    config.settings.clientToken = createConfigId('t');
+  }
   // 首启与损坏重建时，拿到的默认配置只在内存里：必须落盘，否则下次启动还是走同一条分支，
   // 界面里显示的「配置文件」也始终不存在
-  if (loaded.firstRun || loaded.recovered) {
+  if (loaded.firstRun || loaded.recovered || needsClientToken) {
     try {
       const saved = configManager.save(config);
       config = saved.config;
       configIssues = [...configIssues, ...saved.issues];
-      logger.info('[Config] 已写入默认配置', { path: configManager.getPath(), firstRun: loaded.firstRun, recovered: loaded.recovered });
+      logger.info('[Config] 已写入配置', { path: configManager.getPath(), firstRun: loaded.firstRun, recovered: loaded.recovered, generatedClientToken: needsClientToken });
     } catch (error) {
-      configIssues = [...configIssues, `默认配置写入失败：${error.message}`];
-      logger.error('[Config] 默认配置写入失败', { path: configManager.getPath(), error: error.message });
+      configIssues = [...configIssues, `配置写入失败：${error.message}`];
+      logger.error('[Config] 配置写入失败', { path: configManager.getPath(), error: error.message });
     }
   }
   logger.info('[Config] 已加载', { path: configManager.getPath(), port: config.settings.port, issues: configIssues.length });

@@ -1,5 +1,5 @@
 // 请求日志存储：内存环形缓冲（日志页实时看）+ 两份按天 JSONL 落盘。
-// 两份是有意分开的：logs/ 存全字段供事后排查，usage/ 只存聚合与计价用得上的字段。
+// 两份是有意分开的：logs/ 存全字段供事后排查，usage/ 只存聚合用得上的字段。
 // 分开的理由是清理语义不同——清日志不该连用量历史一起清掉，反之亦然。
 //
 // 落盘是旁路：目录建不起来、磁盘写不进去都不能影响代理主流程；读的时候坏行直接跳过，
@@ -14,10 +14,6 @@ const path = require('path');
 const MAX_ENTRIES = 500;
 const DAY_FILE_PATTERN = /^\d{4}-\d{2}-\d{2}\.jsonl$/;
 
-function isPlainObject(value) {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
 // 按本地日期切文件：用户说的「今天」是本地时间的今天，按 UTC 切会在跨日时错位一格
 function dateKey(timestamp) {
   const date = new Date(timestamp);
@@ -25,7 +21,7 @@ function dateKey(timestamp) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
-// 用量记录只留聚合与计价用得上的字段：换单价不用回头重算历史，也够看单条的消耗
+// 用量记录只留聚合用得上的字段，也够看单条的消耗
 function toUsageRecord(entry) {
   return {
     timestamp: entry.timestamp,
@@ -41,34 +37,16 @@ function toUsageRecord(entry) {
 }
 
 function emptyBucket() {
-  // priced 记「这一桶里有多少条是按当前单价算得出钱的」：某个模型没配单价时，
-  // 该桶的费用只是部分的，界面要能看出这一点而不是把不完整的金额当真
-  return { requests: 0, failed: 0, cancelled: 0, input: 0, output: 0, cost: 0, priced: 0 };
-}
-
-// 费用在这里算而不是落盘时算：单价改了历史费用要立刻跟着变，存下来就成了快照。
-// 每次聚合都按当前单价重算，所以读历史与读今天走的是同一条路
-function costOf(record, pricing) {
-  const price = pricing[record.realModel];
-  if (!price) return null;
-  const input = Number.isFinite(record.input) ? record.input : 0;
-  const output = Number.isFinite(record.output) ? record.output : 0;
-  // 单价是「每百万 tokens」，两者都在这条线上
-  return (input / 1e6) * price.input + (output / 1e6) * price.output;
+  return { requests: 0, failed: 0, cancelled: 0, input: 0, output: 0 };
 }
 
 // 取消不算失败：用户自己按了 Esc 不该污染上游错误率
-function addToBucket(bucket, record, pricing) {
+function addToBucket(bucket, record) {
   bucket.requests += 1;
   if (record.status === 'cancelled') bucket.cancelled += 1;
   else if (record.status !== 'ok') bucket.failed += 1;
   if (Number.isFinite(record.input)) bucket.input += record.input;
   if (Number.isFinite(record.output)) bucket.output += record.output;
-  const cost = pricing ? costOf(record, pricing) : null;
-  if (cost !== null) {
-    bucket.cost += cost;
-    bucket.priced += 1;
-  }
 }
 
 function createRequestLog({ dir, maxEntries } = {}) {
@@ -188,10 +166,9 @@ function createRequestLog({ dir, maxEntries } = {}) {
   }
 
   // 按天 / 供应商 / 模型三个维度一次算齐：切换维度是纯展示，不该再读一遍磁盘。
-  // 模型维度不区分协议——单价是按模型名配的，同一个模型走哪个协议都该合在一起算钱
+  // 模型维度不区分协议——同一个模型走哪个协议都该合在一起算
   function usage(options = {}) {
     const { from, to } = resolveRange(options);
-    const pricing = isPlainObject(options.pricing) ? options.pricing : null;
     const records = readUsageRecords(from, to);
     const totals = emptyBucket();
     const byDay = new Map();
@@ -211,7 +188,7 @@ function createRequestLog({ dir, maxEntries } = {}) {
       if (!byProvider.has(provider)) byProvider.set(provider, { key: provider, ...emptyBucket() });
       if (!byModel.has(model)) byModel.set(model, { key: model, ...emptyBucket() });
       for (const bucket of [totals, byDay.get(day), byProtocol.get(protocol), byProvider.get(provider), byModel.get(model)]) {
-        addToBucket(bucket, record, pricing);
+        addToBucket(bucket, record);
       }
     }
     return {

@@ -82,7 +82,7 @@ const deletingMappingCount = computed(() =>
         <div class="provider-models">
           <span v-if="provider.models.length === 0" class="provider-models-empty">未配置模型</span>
           <template v-else>
-            <span v-for="model in provider.models.slice(0, 2)" :key="model" class="provider-model">{{ model }}</span>
+            <span v-for="model in provider.models.slice(0, 2)" :key="model.name" class="provider-model">{{ model.name }}</span>
             <span v-if="provider.models.length > 2" class="provider-model">+{{ provider.models.length - 2 }}</span>
           </template>
         </div>
