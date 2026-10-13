@@ -11,15 +11,17 @@ const STATUS_TEXT = {
 };
 
 function buildStatusLabel(proxy) {
-  if (proxy.status === 'running') return `● ${STATUS_TEXT.running} · 127.0.0.1:${proxy.port}`;
+  if (proxy.status === 'running') return `${STATUS_TEXT.running} · 127.0.0.1:${proxy.port}`;
   const reason = proxy.error ? `：${proxy.error}` : '';
-  return `○ ${STATUS_TEXT[proxy.status] || STATUS_TEXT.stopped}${reason}`;
+  return `${STATUS_TEXT[proxy.status] || STATUS_TEXT.stopped}${reason}`;
 }
 
-function buildTrayMenu(state, actions) {
+// icons = { running, stopped }：托盘那套圆点模板图，由 tray.js 注入（这里不碰 electron）。
+// 状态行不再用 ● / ○ 字符——字符是跟菜单文字同色的普通文本，而模板图能与菜单栏图标同形且随深浅色反色
+function buildTrayMenu(state, actions, icons = {}) {
   const { proxy } = state;
   return [
-    { label: buildStatusLabel(proxy), enabled: false },
+    { label: buildStatusLabel(proxy), icon: proxy.status === 'running' ? icons.running : icons.stopped, enabled: false },
     { type: 'separator' },
     { label: '打开主窗口', click: () => actions.openWindow() },
     { label: proxy.status === 'running' ? '停止代理' : '启动代理', click: () => actions.toggleProxy() },

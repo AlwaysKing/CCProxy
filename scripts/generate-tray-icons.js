@@ -1,5 +1,5 @@
 // 生成 macOS 托盘模板图标（纯黑 + alpha，系统自动反色适配深浅色）。
-// 输出 build/icons/tray{Running,Stopped}Template.png 与 @2x。手写 PNG，零依赖。
+// 输出 resources/icons/tray{Running,Stopped}Template.png 与 @2x。手写 PNG，零依赖。
 // 用法：node scripts/generate-tray-icons.js
 
 'use strict';
@@ -74,7 +74,7 @@ const SPECS = [
   { name: 'trayStoppedTemplate@2x.png', size: 32, radius: 12.4, innerRadius: 7.2 }
 ];
 
-const outDir = path.join(__dirname, '..', 'build', 'icons');
+const outDir = path.join(__dirname, '..', 'resources', 'icons');
 fs.mkdirSync(outDir, { recursive: true });
 
 for (const spec of SPECS) {

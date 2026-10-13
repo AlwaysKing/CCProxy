@@ -40,7 +40,7 @@ test('claude：写 env 的两个键，其余内容一个不动', (t) => {
   writeFile(dir, 'settings.json', JSON.stringify(original, null, 2));
 
   const result = applyClientConfig(dir, 'claude', CONTEXT);
-  const written = JSON.parse(fs.readFileSync(result.file, 'utf8'));
+  const written = JSON.parse(fs.readFileSync(result[0].file, 'utf8'));
 
   assert.equal(written.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:18888');
   assert.equal(written.env.ANTHROPIC_AUTH_TOKEN, 't_abc123');
@@ -57,8 +57,8 @@ test('claude：写入后检查变 ok，且留了一份备份', (t) => {
   const filePath = writeFile(dir, 'settings.json', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://192.168.60.2:9005' } }));
 
   const result = applyClientConfig(dir, 'claude', CONTEXT);
-  assert.equal(result.backupPath, `${filePath}.ccproxy-bak`);
-  assert.equal(fs.readFileSync(result.backupPath, 'utf8'), JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://192.168.60.2:9005' } }));
+  assert.equal(result[0].backupPath, `${filePath}.ccproxy-bak`);
+  assert.equal(fs.readFileSync(result[0].backupPath, 'utf8'), JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://192.168.60.2:9005' } }));
   assert.equal(inspectClientConfig(dir, 'claude', CONTEXT).status, 'ok');
 });
 
@@ -111,7 +111,7 @@ test('claude：要写的都在了就不落盘（不覆盖备份、不动文件�
   const filePath = writeFile(dir, 'settings.json', before);
 
   const result = applyClientConfig(dir, 'claude', CONTEXT);
-  assert.equal(result.backupPath, null);
+  assert.equal(result[0].backupPath, null);
   assert.deepEqual(fs.readdirSync(dir), ['settings.json']);
   assert.equal(fs.readFileSync(filePath, 'utf8'), before);
 });
@@ -136,6 +136,17 @@ test('claude：settings.json 坏掉时放弃写入，不覆盖用户那份', (t)
   // 原文件与备份都不该被创建/改动
   assert.equal(fs.readFileSync(filePath, 'utf8'), '{ 这不是 json');
   assert.deepEqual(fs.readdirSync(dir), ['settings.json']);
+});
+
+test('claude：env 是个空对象也能把两个键补进去', (t) => {
+  const dir = makeDir(t);
+  writeFile(dir, 'settings.json', '{\n  "env": {}\n}\n');
+
+  applyClientConfig(dir, 'claude', CONTEXT);
+  const written = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+  assert.equal(written.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:18888');
+  assert.equal(written.env.ANTHROPIC_AUTH_TOKEN, 't_abc123');
+  assert.equal(inspectClientConfig(dir, 'claude', CONTEXT).status, 'ok');
 });
 
 test('claude：原子写不留临时文件，权限沿用原文件', (t) => {
@@ -322,7 +333,7 @@ test('codex：model_provider 已经指向我们（单引号写法）时那一行
   ].join('\n'));
 
   const result = applyClientConfig(dir, 'codex', CONTEXT);
-  assert.equal(result.backupPath, null); // 一个字节都没改，不落盘
+  assert.equal(result[0].backupPath, null); // 一个字节都没改，不落盘
   const text = fs.readFileSync(path.join(dir, 'config.toml'), 'utf8');
   assert.match(text, /^model_provider = 'ccproxy' # 写法是用户自己的$/m);
   assert.equal(inspectClientConfig(dir, 'codex', CONTEXT).status, 'ok');
@@ -383,8 +394,8 @@ test('codex：写完留一份 .ccproxy-bak', (t) => {
   const dir = makeDir(t);
   const filePath = writeFile(dir, 'config.toml', 'model_provider = "custom"\n');
   const result = applyClientConfig(dir, 'codex', CONTEXT);
-  assert.equal(result.backupPath, `${filePath}.ccproxy-bak`);
-  assert.equal(fs.readFileSync(result.backupPath, 'utf8'), 'model_provider = "custom"\n');
+  assert.equal(result[0].backupPath, `${filePath}.ccproxy-bak`);
+  assert.equal(fs.readFileSync(result[0].backupPath, 'utf8'), 'model_provider = "custom"\n');
   assert.deepEqual(fs.readdirSync(dir).sort(), ['config.toml', 'config.toml.ccproxy-bak']);
 });
 

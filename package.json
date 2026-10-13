@@ -35,7 +35,8 @@
     },
     "mac": {
       "category": "public.app-category.developer-tools",
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "icon": "resources/icons/icon.png"
     }
   }
 }

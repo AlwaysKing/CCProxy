@@ -38,8 +38,10 @@ const isEdit = computed(() => !!props.provider)
 // 只有 OpenAI 协议的模型显示窗口与模态配置
 const showModelAttrs = computed(() => props.protocol.id === 'openai')
 
+// 新建行的默认值照 codex 清单的常规水位给：窗口 1024000、推理默认支持——
+// 大多数模型填个名字就能用，少数不支持推理的自己去掉勾。Anthropic 侧不读这几个字段
 function emptyModel(name = '') {
-  return { name, contextWindow: '', maxContextWindow: '', image: false, reasoning: false }
+  return { name, contextWindow: '1024000', maxContextWindow: '', image: false, reasoning: true }
 }
 
 // 配置条目 → 表单行：窗口空值统一成空串（留空就是没配），模态拆成勾选

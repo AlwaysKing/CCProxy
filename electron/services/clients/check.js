@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const { scanTomlLines } = require('./toml');
+const { CATALOG_FILE, CATALOG_KEY, catalogFilePath, inspectCatalog } = require('./catalog');
 
 // 认作「本机」的主机名。地址必须搭配端口一起判：CCGUI 的本地代理也挂在本机，
 // 只看主机名会把它的配置当成我们的
@@ -87,10 +88,12 @@ function readCodexProvider(dirPath) {
   // 无原型对象：节名可以是 __proto__ 这类名字，用普通对象当字典会被写到 Object.prototype 上
   const providers = Object.create(null);
   let providerId = '';
+  let catalogPath = '';
   for (const line of lines) {
     if (line.kind !== 'entry') continue;
     if (!line.section) {
       if (line.key === 'model_provider') providerId = line.value;
+      if (line.key === CATALOG_KEY) catalogPath = line.value;
       continue;
     }
     // 节名已归一化，[model_providers."ccproxy"] 与 [model_providers.ccproxy] 是同一个
@@ -108,7 +111,8 @@ function readCodexProvider(dirPath) {
     providerId,
     baseUrl: block.base_url || '',
     token: block.experimental_bearer_token || '',
-    requiresOpenaiAuth: block.requires_openai_auth === 'true'
+    requiresOpenaiAuth: block.requires_openai_auth === 'true',
+    catalogPath
   };
 }
 
@@ -122,6 +126,35 @@ function inspectClaudeDir(dirPath, context) {
   const tokenProblem = collectTokenProblem(endpoint.token, context);
   if (tokenProblem) problems.push(`ANTHROPIC_AUTH_TOKEN ${tokenProblem}`);
   return { status: problems.length ? 'mismatch' : 'ok', target: endpoint.baseUrl, problems };
+}
+
+// 模型清单的检查：指向键在不在、指没指对、清单里的条目与 CCProxy 配置是否一致。
+// 前提是 OpenAI 协议下有归我们管的模型（context.catalog 非空）——一条映射都没有时
+// 清单整份都不归我们管（codex 也拒绝加载空清单），不去挑人家的毛病
+function collectCatalogProblems(dirPath, provider, context, problems) {
+  const expectedPath = catalogFilePath(dirPath);
+  if (!provider.catalogPath) {
+    problems.push(`config.toml 没有配置 ${CATALOG_KEY}，codex 读不到模型清单`);
+  } else if (path.resolve(provider.catalogPath) !== expectedPath) {
+    problems.push(`${CATALOG_KEY} 指向 ${provider.catalogPath}，不是 ${expectedPath}`);
+  }
+
+  const filePath = path.join(dirPath, CATALOG_FILE);
+  let text;
+  try {
+    text = fs.readFileSync(filePath, 'utf8');
+  } catch (error) {
+    // 文件不存在是能「应用」补出来的毛病；别的读失败（权限之类）才是没法判断
+    if (error.code === 'ENOENT') {
+      problems.push(`没有 ${CATALOG_FILE}，codex 读不到模型清单`);
+      return 'mismatch';
+    }
+    problems.push(`读取 ${CATALOG_FILE} 失败：${error.message}`);
+    return 'unreadable';
+  }
+  const inspect = inspectCatalog(text, context.catalog);
+  problems.push(...inspect.problems);
+  return inspect.status;
 }
 
 function inspectCodexDir(dirPath, context) {
@@ -139,12 +172,21 @@ function inspectCodexDir(dirPath, context) {
     const tokenProblem = collectTokenProblem(provider.token, context);
     if (tokenProblem) problems.push(`experimental_bearer_token ${tokenProblem}`);
   }
-  return { status: problems.length ? 'mismatch' : 'ok', target: provider.baseUrl, problems };
+
+  let status = problems.length ? 'mismatch' : 'ok';
+  if (context.catalog && context.catalog.length) {
+    const catalogStatus = collectCatalogProblems(dirPath, provider, context, problems);
+    // 清单读不出来（坏 JSON 之类）是「没法判断」，和能读但内容不对分开报
+    if (catalogStatus === 'unreadable') status = 'unreadable';
+    else if (catalogStatus === 'mismatch' && status === 'ok') status = 'mismatch';
+  }
+  return { status, target: provider.baseUrl, problems };
 }
 
-// 检查一个目录。context = { port, token }，address 由 port 推出，给界面显示「应该指向哪」
-function inspectClientConfig(dirPath, kind, { port, token }) {
-  const context = { port, token, address: `http://127.0.0.1:${port}` };
+// 检查一个目录。context = { port, token, catalog }：address 由 port 推出，给界面显示
+// 「应该指向哪」；catalog 是 OpenAI 协议算出的期望清单条目，只有 codex 用（可缺省）
+function inspectClientConfig(dirPath, kind, { port, token, catalog }) {
+  const context = { port, token, catalog, address: `http://127.0.0.1:${port}` };
   if (kind === 'claude') return inspectClaudeDir(dirPath, context);
   if (kind === 'codex') return inspectCodexDir(dirPath, context);
   return { status: 'unreadable', target: '', problems: [`未知的目录类型：${kind}`] };

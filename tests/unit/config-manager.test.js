@@ -9,6 +9,7 @@ const path = require('path');
 const {
   createConfigManager,
   createDefaultConfig,
+  createClientToken,
   validateConfig,
   DEFAULT_PORT
 } = require('../../electron/storage/config-manager');
@@ -249,5 +250,11 @@ test('校验：配置里残留的 activeProviderId 不再保留', () => {
   });
   assert.equal('activeProviderId' in result.config.protocols[0], false);
   assert.equal(result.config.protocols[0].mappings[0].clientModel, '*');
+});
+
+test('createClientToken：sk- 前缀 + 32 位十六进制，且每次生成都不同', () => {
+  const token = createClientToken();
+  assert.match(token, /^sk-[0-9a-f]{32}$/);
+  assert.notEqual(token, createClientToken());
 });
 

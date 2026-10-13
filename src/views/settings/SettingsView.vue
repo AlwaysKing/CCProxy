@@ -1,5 +1,5 @@
 <script setup>
-// 设置页：端口、开机自启、客户端目录、数据存储。
+// 设置页：端口、客户端 token、开机自启、客户端目录、数据存储。
 // 端口保存后由主进程判断要不要按新端口重启（applyConfig 的副作用）——这里不发重启指令，
 // 托盘或别处改配置走的也是同一条路，两边行为必须一致
 import { computed, onMounted, ref, watch } from 'vue'
@@ -17,7 +17,7 @@ const portDraft = ref('')
 const notice = ref('')
 const stats = ref(null)
 const clearing = ref(false)
-const confirmingClear = ref(null) // 'logs' | 'usage' | null
+const confirmingClear = ref(null) // 'logs' | 'usage' | 'token' | null
 
 const port = computed(() => configStore.config?.settings.port ?? null)
 // 配置里改了端口（哪怕不是在本页改的）要跟着刷草稿，否则这里显示的还是旧值
@@ -49,6 +49,20 @@ async function onToggleLaunchAtLogin(value) {
   notice.value = ''
   const ok = await configStore.updateSetting('launchAtLogin', value)
   if (!ok) notice.value = configStore.error || '保存失败'
+}
+
+// 客户端 token 由主进程生成并落盘，这里只展示与复制；重新生成也走主进程
+// （applyConfig 会广播 config-changed，configStore 自动跟上）
+const clientToken = computed(() => configStore.config?.settings.clientToken ?? '')
+const showToken = ref(false)
+
+async function onCopyToken() {
+  if (!clientToken.value) return
+  try {
+    await navigator.clipboard.writeText(clientToken.value)
+  } catch (e) {
+    notice.value = '复制失败'
+  }
 }
 
 async function loadStats() {
@@ -97,14 +111,31 @@ const STORAGE_ROWS = computed(() => [
 ])
 
 const CLEAR_META = {
-  logs: { title: '清空请求日志', description: '会删掉落盘的全部历史日志，不影响用量统计。内存里的最近 500 条会在下次打开日志页时重新加载。确定清空？' },
-  usage: { title: '清空用量记录', description: '会删掉全部用量历史，之后统计从零开始，请求日志不受影响。确定清空？' }
+  logs: { title: '清空请求日志', description: '会删掉落盘的全部历史日志，不影响用量统计。内存里的最近 500 条会在下次打开日志页时重新加载。确定清空？', confirmText: '清空' },
+  usage: { title: '清空用量记录', description: '会删掉全部用量历史，之后统计从零开始，请求日志不受影响。确定清空？', confirmText: '清空' },
+  token: { title: '重新生成客户端 token', description: '会换一个新的 token；原本一致的客户端配置目录会自动写入新值，原本就有问题的保持原样，仍需手动处理。确定重新生成？', confirmText: '重新生成' }
 }
 
 async function onClear() {
   const key = confirmingClear.value
   clearing.value = true
   try {
+    if (key === 'token') {
+      const result = await window.electronAPI.regenerateClientToken()
+      if (!result.success) notice.value = result.error || '重新生成失败'
+      else {
+        // 主进程已落盘并广播，直接回填拿最新值，不赌广播与响应的到达顺序
+        configStore.applyState({ config: result.config })
+        showToken.value = true
+        notice.value = result.errors?.length
+          ? `已重新生成；${result.reapplied?.length ?? 0} 个目录已自动写入，${result.errors.length} 个写入失败：${result.errors[0].message}`
+          : `已重新生成；原本一致的 ${result.reapplied?.length ?? 0} 个目录已自动写入新 token`
+        // token 一换检查结论就过期了，重扫一遍（与改端口同一条路）
+        await clientDirsStore.reload()
+      }
+      confirmingClear.value = null
+      return
+    }
     const result = key === 'usage'
       ? await window.electronAPI.clearUsage()
       : await window.electronAPI.clearLogs()
@@ -149,6 +180,34 @@ onMounted(() => {
 
       <div class="setting-row">
         <div class="setting-info">
+          <span class="setting-name">客户端 token</span>
+          <span class="setting-desc">客户端连 CCProxy 的凭证，配置客户端时填它；重新生成后，原本一致的目录会自动写入新值，原本有问题的保持原样</span>
+        </div>
+        <div class="setting-control">
+          <span class="token-value" :title="showToken ? clientToken : ''">{{ showToken ? clientToken : '••••••••••••••••' }}</span>
+          <IconButton size="sm" :title="showToken ? '隐藏' : '显示'" @click="showToken = !showToken">
+            <svg v-if="showToken" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
+              <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
+              <line x1="1" y1="1" x2="23" y2="23" />
+            </svg>
+            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          </IconButton>
+          <IconButton size="sm" title="复制" @click="onCopyToken">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          </IconButton>
+          <BaseButton variant="secondary" size="sm" @click="confirmingClear = 'token'">重新生成</BaseButton>
+        </div>
+      </div>
+
+      <div class="setting-row">
+        <div class="setting-info">
           <span class="setting-name">开机自启</span>
           <span class="setting-desc">登录 macOS 后自动启动 CCProxy（同步到系统设置的用户与群组登录项）</span>
         </div>
@@ -163,7 +222,7 @@ onMounted(() => {
         <div class="setting-info">
           <span class="setting-name">客户端配置目录</span>
           <span class="setting-desc">扫描到的 Claude / Codex 配置目录；内置位置自动发现，手动添加的目录失效后会被自动移除</span>
-          <span v-if="expectedAddress" class="setting-desc">检查口径：指向 <code>{{ expectedAddress }}</code> 且 token 与 CCProxy 一致；不一致的行可点「应用」写入</span>
+          <span v-if="expectedAddress" class="setting-desc">检查口径：指向 <code>{{ expectedAddress }}</code> 且 token 与 CCProxy 一致；Codex 还会对照模型清单（models.json）与 OpenAI 协议映射。不一致的行可点「应用」写入</span>
         </div>
         <BaseButton size="sm" :loading="dirBusy" @click="onAddDir">+ 添加目录</BaseButton>
       </div>
@@ -230,7 +289,7 @@ onMounted(() => {
       :model-value="!!confirmingClear"
       :title="CLEAR_META[confirmingClear]?.title || '确认操作'"
       :description="CLEAR_META[confirmingClear]?.description || ''"
-      confirm-text="清空"
+      :confirm-text="CLEAR_META[confirmingClear]?.confirmText || '确认'"
       :loading="clearing"
       @update:model-value="confirmingClear = null"
       @confirm="onClear"
@@ -391,6 +450,14 @@ onMounted(() => {
 
 .port-input {
   width: 120px;
+}
+
+/* token 整串亮出来，不截断：要看完整值就得复制级别的完整，截一半没有意义 */
+.token-value {
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
 }
 
 .storage-size {

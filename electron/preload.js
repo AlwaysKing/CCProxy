@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAppState: () => ipcRenderer.invoke('get-app-state'),
   getConfig: () => ipcRenderer.invoke('get-config'),
   saveConfig: (config) => ipcRenderer.invoke('save-config', config),
+  regenerateClientToken: () => ipcRenderer.invoke('regenerate-client-token'),
   getProxyStatus: () => ipcRenderer.invoke('get-proxy-status'),
   startProxy: () => ipcRenderer.invoke('start-proxy'),
   stopProxy: () => ipcRenderer.invoke('stop-proxy'),

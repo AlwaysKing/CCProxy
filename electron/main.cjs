@@ -6,13 +6,14 @@
 const path = require('path');
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const logger = require('./logger');
-const { createConfigManager, createConfigId } = require('./storage/config-manager');
+const { createConfigManager, createConfigId, createClientToken } = require('./storage/config-manager');
 const { createRequestLog } = require('./storage/request-log');
 const { createLocalProxy } = require('./services/proxy');
 const { fetchUpstreamModels } = require('./services/proxy/fetch-models');
 const { builtinDirs, detectDirKind, scanClientDirs } = require('./services/clients/dirs');
 const { inspectClientConfig } = require('./services/clients/check');
-const { applyClientConfig } = require('./services/clients/apply');
+const { applyClientConfig, syncCodexCatalogs } = require('./services/clients/apply');
+const { expectedCatalogEntries } = require('./services/clients/catalog');
 const tray = require('./tray');
 
 // 未打包（开发态）一律加载 Vite dev server，改渲染层代码即时热更新；
@@ -65,11 +66,13 @@ function createWindow() {
     mainWindow.loadFile(RENDERER_INDEX);
   }
 
-  // 关窗口只隐藏：代理要继续在后台服务
+  // 关窗口只隐藏：代理要继续在后台服务。同时隐藏 Dock 图标（agent 应用模式），
+  // 看起来像已退出，实际进程和托盘还活着；showWindow() 时再恢复
   mainWindow.on('close', (event) => {
     if (isQuitting) return;
     event.preventDefault();
     mainWindow.hide();
+    if (process.platform === 'darwin' && app.dock) app.dock.hide();
   });
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -80,6 +83,8 @@ function createWindow() {
 function showWindow() {
   if (!mainWindow) createWindow();
   if (mainWindow.isMinimized()) mainWindow.restore();
+  // 恢复 Dock 图标（关窗口时被隐藏了）再显示窗口，否则窗口没有所属的 Dock 入口
+  if (process.platform === 'darwin' && app.dock) app.dock.show();
   mainWindow.show();
   mainWindow.focus();
 }
@@ -132,6 +137,10 @@ function applyConfigEffects(previous, next) {
     logger.info('[Proxy] 端口变更，按新端口重启', { port: next.settings.port });
     restartProxy().catch((error) => logger.error('[Proxy] 端口变更后重启失败', { error: error.message }));
   }
+  // 协议配置一变，已托管 codex 目录的模型清单就过期了——趁广播通知界面之前刷掉，
+  // 界面随后重扫时看到的就是新结果，不会闪一个「不一致」出来
+  const protocolsChanged = !previous || JSON.stringify(previous.protocols) !== JSON.stringify(next.protocols);
+  if (protocolsChanged) syncManagedCodexCatalogs();
 }
 
 // 所有配置变更的唯一出口：落盘 → 更新内存 → 应用副作用 → 刷托盘 → 通知界面
@@ -192,6 +201,44 @@ ipcMain.handle('save-config', async (event, nextConfig) => {
   }
 });
 
+// 重新生成客户端 token：与 persistClientDirs 一样走 applyConfig 落盘并广播。
+// 代理按请求读最新配置，不用重启。原本就配好（地址与 token 都对）的目录属于「被换 token 连坐」，
+// 自动跟着写入新值，不让用户白点一遍「应用」；原本就不一致的本来就要人工处理，不趁机动它——
+// 所以 ok 名单必须按旧 token 先扫出来，换完再扫就全不一致了。
+// 返回新配置让界面直接回填，不赌广播与响应的到达顺序
+ipcMain.handle('regenerate-client-token', async () => {
+  try {
+    const before = scanClientDirs({ manual: config.settings.clientDirs });
+    const wasOk = [...before.builtin, ...before.manual].filter((entry) => entry.status === 'ok');
+
+    const draft = JSON.parse(JSON.stringify(config));
+    draft.settings.clientToken = createClientToken();
+    applyConfig(draft);
+    logger.info('[Config] 已重新生成客户端 token');
+
+    const reapplied = [];
+    const errors = [];
+    for (const entry of wasOk) {
+      try {
+        const result = applyClientConfig(entry.path, entry.kind, {
+          port: config.settings.port,
+          token: config.settings.clientToken,
+          ...codexCatalogContext()
+        });
+        reapplied.push(entry.path);
+        logger.info('[ClientDirs] 换 token 后已自动写入', { kind: entry.kind, path: entry.path, files: result.map((item) => item.file) });
+      } catch (error) {
+        errors.push({ path: entry.path, message: error.message });
+        logger.error('[ClientDirs] 换 token 后自动写入失败', { path: entry.path, error: error.message });
+      }
+    }
+    return { success: true, config, reapplied, errors };
+  } catch (error) {
+    logger.error('[Config] 重新生成客户端 token 失败', { error: error.message });
+    return { success: false, error: error.message };
+  }
+});
+
 // ============================================
 // Client Config Dirs IPC Handlers
 // ============================================
@@ -204,6 +251,28 @@ function persistClientDirs(nextDirs) {
   applyConfig(draft);
 }
 
+// codex 模型清单的期望条目：OpenAI 协议下启用的映射 → 名字用 clientModel、能力取映射
+// 指向的真实模型。检查与应用共用这一份，两边口径才不会漂
+function codexCatalogContext() {
+  const protocol = (config.protocols || []).find((item) => item.id === 'openai');
+  return { catalog: expectedCatalogEntries(protocol) };
+}
+
+// 协议配置变了（模型能力、映射、供应商启停）就把已归我们管的 codex 目录的清单刷一遍，
+// 用户改完配置不用再跑去设置页点「应用」。没归我们管的目录不动，留给手动应用。
+// 失败只记日志不打断：清单没刷成，下一次目录检查会把不一致报出来
+function syncManagedCodexCatalogs() {
+  try {
+    const scan = scanClientDirs({ manual: config.settings.clientDirs });
+    const context = { port: config.settings.port, token: config.settings.clientToken, ...codexCatalogContext() };
+    const { applied, errors } = syncCodexCatalogs([...scan.builtin, ...scan.manual], context);
+    if (applied.length) logger.info('[ClientDirs] 模型清单已随配置自动更新', { files: applied.map((item) => item.file) });
+    for (const item of errors) logger.error('[ClientDirs] 模型清单自动更新失败', { path: item.path, error: item.message });
+  } catch (error) {
+    logger.error('[ClientDirs] 模型清单自动更新失败', { error: error.message });
+  }
+}
+
 ipcMain.handle('get-client-dirs', async () => {
   try {
     const manual = config.settings.clientDirs;
@@ -213,8 +282,9 @@ ipcMain.handle('get-client-dirs', async () => {
       persistClientDirs(scan.manual);
     }
     // 检查结果跟着目录一起返回：界面拿到的每条目录自带「有没有指向 CCProxy」的状态。
-    // 期望地址由当前端口与客户端 token 推出，所以端口或 token 一变，下一次取列表就是新结果
-    const context = { port: config.settings.port, token: config.settings.clientToken };
+    // 期望地址由当前端口与客户端 token 推出，所以端口或 token 一变，下一次取列表就是新结果；
+    // codex 还多带一份模型清单的期望条目，映射改了重扫结论也会跟着变
+    const context = { port: config.settings.port, token: config.settings.clientToken, ...codexCatalogContext() };
     const inspect = (entry) => ({ ...entry, ...inspectClientConfig(entry.path, entry.kind, context) });
     return {
       success: true,
@@ -271,10 +341,13 @@ ipcMain.handle('apply-client-dir', async (event, dirPath) => {
     if (!entry) return { success: false, error: '该目录不在扫描结果里，请先刷新' };
     const result = applyClientConfig(entry.path, entry.kind, {
       port: config.settings.port,
-      token: config.settings.clientToken
+      token: config.settings.clientToken,
+      ...codexCatalogContext()
     });
-    logger.info('[ClientDirs] 已写入 CCProxy 配置', { kind: entry.kind, file: result.file, backupPath: result.backupPath });
-    return { success: true, ...result };
+    // result 是写入的文件清单（config.toml 之外可能还有 models.json），逐个记上
+    const written = result.map((item) => item.file);
+    logger.info('[ClientDirs] 已写入 CCProxy 配置', { kind: entry.kind, files: written });
+    return { success: true, files: result };
   } catch (error) {
     logger.error('[ClientDirs] 写入失败', { error: error.message });
     return { success: false, error: error.message };
@@ -395,6 +468,11 @@ ipcMain.on('log', (event, args) => {
 async function bootstrap() {
   logger.initialize();
 
+  // 开发模式下 Dock 显示的是默认 Electron 图标，这里手动换成应用图标（打包后的 app 会用 icns，不受影响）
+  if (process.platform === 'darwin' && app.dock) {
+    app.dock.setIcon(path.join(__dirname, '..', 'resources', 'icons', 'icon.png'));
+  }
+
   configManager = createConfigManager();
   const loaded = configManager.load();
   config = loaded.config;
@@ -408,7 +486,7 @@ async function bootstrap() {
   // 在内存里补一个并落盘：不落盘的话每次启动都会换一个新的，客户端那边填过也对不上
   const needsClientToken = !config.settings.clientToken;
   if (needsClientToken) {
-    config.settings.clientToken = createConfigId('t');
+    config.settings.clientToken = createClientToken();
   }
   // 首启与损坏重建时，拿到的默认配置只在内存里：必须落盘，否则下次启动还是走同一条分支，
   // 界面里显示的「配置文件」也始终不存在

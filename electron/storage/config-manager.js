@@ -39,6 +39,12 @@ function createConfigId(prefix) {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, '').slice(0, 8)}`;
 }
 
+// 客户端 token 是要填进客户端配置里的凭证，长得跟常见 API key 一致（sk- + 32 位十六进制），
+// 与 createConfigId 生成的内部短 id 是两回事，别混用
+function createClientToken() {
+  return `sk-${crypto.randomBytes(16).toString('hex')}`;
+}
+
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -357,6 +363,7 @@ module.exports = {
   createConfigManager,
   createDefaultConfig,
   createConfigId,
+  createClientToken,
   validateConfig,
   DEFAULT_PORT,
   CONFIG_VERSION

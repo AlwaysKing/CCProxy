@@ -92,6 +92,26 @@ function readJsonObject(text, objectStart) {
   return null;
 }
 
+// 读一个数组，给出每个元素值的下标范围与闭合方括号的位置；读不成给出 null
+function readJsonArray(text, arrayStart) {
+  if (text[arrayStart] !== '[') return null;
+  const items = [];
+  let cursor = skipWhitespace(text, arrayStart + 1);
+  if (text[cursor] === ']') return { items, closeIndex: cursor };
+
+  while (cursor < text.length) {
+    const start = cursor;
+    const end = scanValue(text, start);
+    if (end === -1) return null;
+    items.push({ start, end });
+    cursor = skipWhitespace(text, end);
+    if (text[cursor] === ']') return { items, closeIndex: cursor };
+    if (text[cursor] !== ',') return null;
+    cursor = skipWhitespace(text, cursor + 1);
+  }
+  return null;
+}
+
 // 修表 ======================================================================
 
 // index 所在行的缩进（新插入的键照它对齐；已有内容一概不动）
@@ -175,6 +195,12 @@ function setObjectValues(jsonText, objectName, values) {
     }
   }
 
+  return setMembersAt(text, container, containerStart, values, unit, edits);
+}
+
+// 只算编辑不落文本：catalog 要把多个条目的改动和新增条目攒成一份编辑表一次提交，
+// 全文只 parse 校验一遍。containerStart 是容器对象 '{' 的下标（空对象补键时用）
+function planMembersAt(text, container, containerStart, values, unit, edits) {
   const keyIndent = container.members.length
     ? indentAt(text, container.members[0].keyStart)
     : indentAt(text, container.closeIndex) + unit;
@@ -195,17 +221,26 @@ function setObjectValues(jsonText, objectName, values) {
   for (const [key, value] of Object.entries(values)) {
     const member = container.members.find((item) => item.name === key);
     if (!member) continue;
-    // 值本来就是目标值就别动它，连一个字节都不碰（转义写法不同但值相同也算不碰）
+    // 值本来就是目标值就别动它，连一个字节都不碰（转义写法不同但值相同也算不碰）。
+    // 深比较：值可能是数组/对象（模型清单里的模态、推理档位），严格相等永远为假
     let current;
     try {
       current = JSON.parse(text.slice(member.valueStart, member.valueEnd));
     } catch {
       current = undefined;
     }
-    if (current === value) continue;
+    if (current !== undefined && JSON.stringify(current) === JSON.stringify(value)) continue;
     edits.push({ start: member.valueStart, end: member.valueEnd, text: JSON.stringify(value) });
   }
 
+  return edits;
+}
+
+// 把对象里若干成员设成新值，返回 { text, changed }。setObjectValues 管根/命名子对象，
+// catalog.js 管数组元素里的对象，落到的都是这一段：只换目标值的字节区间、缺的键按对象
+// 自己的缩进补在末尾，值没变就一个字节不碰。结构不对抛错，由调用方放弃写入
+function setMembersAt(text, container, containerStart, values, unit, edits) {
+  planMembersAt(text, container, containerStart, values, unit, edits);
   return finish(text, edits);
 }
 
@@ -221,4 +256,12 @@ function finish(text, edits) {
   return { text: result, changed: true };
 }
 
-module.exports = { setObjectValues };
+module.exports = {
+  setObjectValues,
+  readJsonObject,
+  readJsonArray,
+  planMembersAt,
+  finish,
+  indentAt,
+  detectIndentUnit
+};
