@@ -151,3 +151,26 @@ test('stats 数出两个目录的文件数与字节数', (t) => {
   assert.ok(stats.usage.bytes > 0);
   assert.ok(stats.usage.bytes < stats.logs.bytes); // 用量行字段更少，必然更小
 });
+
+test('record 按开关分别决定日志与用量的落盘', (t) => {
+  const { log, dir } = makeLog(t);
+  // 只开日志：进内存与 logs/，不写 usage/
+  log.record(forwardedEntry({ id: 'only-logs' }), { logs: true, usage: false });
+  // 只开用量：写 usage/，不进内存也不写 logs/
+  log.record(forwardedEntry({ id: 'only-usage' }), { logs: false, usage: true });
+
+  assert.deepEqual(log.list().map((e) => e.id), ['only-logs']);
+  const logLines = fs.readFileSync(path.join(dir, 'logs', `${dateKey(Date.now())}.jsonl`), 'utf8').trim().split('\n');
+  assert.equal(logLines.length, 1);
+  const usageLines = fs.readFileSync(path.join(dir, 'usage', `${dateKey(Date.now())}.jsonl`), 'utf8').trim().split('\n');
+  assert.equal(usageLines.length, 1);
+  assert.equal(log.usage().totals.requests, 1);
+});
+
+test('两项都关时 record 什么都不落，连目录都不建', (t) => {
+  const { log, dir } = makeLog(t);
+  log.record(forwardedEntry(), { logs: false, usage: false });
+  assert.equal(log.list().length, 0);
+  assert.equal(fs.existsSync(path.join(dir, 'logs')), false);
+  assert.equal(fs.existsSync(path.join(dir, 'usage')), false);
+});

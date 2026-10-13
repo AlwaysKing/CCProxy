@@ -24,7 +24,7 @@ const CLIENT_DIR_KINDS = ['claude', 'codex'];
 function createDefaultConfig() {
   return {
     version: CONFIG_VERSION,
-    settings: { port: DEFAULT_PORT, launchAtLogin: false, clientDirs: [], clientToken: '' },
+    settings: { port: DEFAULT_PORT, launchAtLogin: false, logsEnabled: true, usageEnabled: true, clientDirs: [], clientToken: '' },
     protocols: SUPPORTED_PROTOCOLS.map((preset) => ({
       id: preset.id,
       name: preset.name,
@@ -270,6 +270,9 @@ function validateConfig(raw) {
     settings: {
       port: portValid ? port : DEFAULT_PORT,
       launchAtLogin: settings.launchAtLogin === true,
+      // 开关缺省即开启：老配置里没有这两个键，读出来必须还是记录，行为不回退
+      logsEnabled: settings.logsEnabled !== false,
+      usageEnabled: settings.usageEnabled !== false,
       clientDirs: normalizeClientDirs(settings.clientDirs, issues),
       clientToken: normalizeClientToken(settings.clientToken)
     },

@@ -76,13 +76,16 @@ function createRequestLog({ dir, maxEntries } = {}) {
     return names.filter((name) => DAY_FILE_PATTERN.test(name)).sort();
   }
 
-  function record(entry) {
-    entries.unshift(entry);
-    if (entries.length > limit) entries.length = limit;
-    appendLine(logsDir, entry);
+  // 日志与用量各有一道开关：关了那一项就整条不落（内存也不留），由调用方按配置传入
+  function record(entry, { logs = true, usage = true } = {}) {
+    if (logs) {
+      entries.unshift(entry);
+      if (entries.length > limit) entries.length = limit;
+      appendLine(logsDir, entry);
+    }
     // 用量只统计真正打到上游的请求：未命中 / 识别失败的请求没有供应商与模型可归属，
     // 它们要看的是日志页（那里能按状态码过滤），用量页要的是上游消耗与上游错误率
-    if (entry.outcome === 'forwarded') appendLine(usageDir, toUsageRecord(entry));
+    if (usage && entry.outcome === 'forwarded') appendLine(usageDir, toUsageRecord(entry));
     return entry;
   }
 

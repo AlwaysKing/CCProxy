@@ -258,3 +258,25 @@ test('createClientToken：sk- 前缀 + 32 位十六进制，且每次生成都�
   assert.notEqual(token, createClientToken());
 });
 
+test('默认配置：日志与用量开关都是开启', () => {
+  const config = createDefaultConfig();
+  assert.equal(config.settings.logsEnabled, true);
+  assert.equal(config.settings.usageEnabled, true);
+});
+
+test('校验：日志与用量开关缺省即开启，显式 false 才关', () => {
+  // 老配置里没有这两个键，读回来必须还是开启，行为不回退
+  const absent = validateConfig({ protocols: [] });
+  assert.equal(absent.config.settings.logsEnabled, true);
+  assert.equal(absent.config.settings.usageEnabled, true);
+
+  const off = validateConfig({ settings: { logsEnabled: false, usageEnabled: false } });
+  assert.equal(off.config.settings.logsEnabled, false);
+  assert.equal(off.config.settings.usageEnabled, false);
+
+  // 手改配置塞进非布尔值：按「不等于 false」处理，仍是开启
+  const weird = validateConfig({ settings: { logsEnabled: 'no', usageEnabled: 0 } });
+  assert.equal(weird.config.settings.logsEnabled, true);
+  assert.equal(weird.config.settings.usageEnabled, true);
+});
+

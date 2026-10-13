@@ -513,8 +513,13 @@ async function bootstrap() {
     // 请求日志由 requestLog 落盘并推给界面；不再往 app.log 里灌一份——
     // 那份日志没有轮转，逐请求写会把它撑爆，而且两处记录早晚对不上
     onLog: (entry) => {
-      requestLog.record(entry);
-      broadcast('log-appended', entry);
+      // 读内存里的最新配置：开关一改（applyConfig 广播）当场生效，代理不用重启。
+      // 关了日志就不写内存也不推界面，关了用量就不再归档——两项都关直接返回
+      const logs = config.settings.logsEnabled !== false;
+      const usage = config.settings.usageEnabled !== false;
+      if (!logs && !usage) return;
+      requestLog.record(entry, { logs, usage });
+      if (logs) broadcast('log-appended', entry);
     }
   });
 

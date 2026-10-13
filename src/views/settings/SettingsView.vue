@@ -51,6 +51,16 @@ async function onToggleLaunchAtLogin(value) {
   if (!ok) notice.value = configStore.error || '保存失败'
 }
 
+// 请求日志 / 用量记录的记录开关（缺省即开启）。关掉后主进程不再落对应数据，历史保留
+const logsEnabled = computed(() => configStore.config?.settings.logsEnabled !== false)
+const usageEnabled = computed(() => configStore.config?.settings.usageEnabled !== false)
+
+async function onToggleStorage(settingKey, value) {
+  notice.value = ''
+  const ok = await configStore.updateSetting(settingKey, value)
+  if (!ok) notice.value = configStore.error || '保存失败'
+}
+
 // 客户端 token 由主进程生成并落盘，这里只展示与复制；重新生成也走主进程
 // （applyConfig 会广播 config-changed，configStore 自动跟上）
 const clientToken = computed(() => configStore.config?.settings.clientToken ?? '')
@@ -97,6 +107,8 @@ const STORAGE_ROWS = computed(() => [
   {
     key: 'logs',
     name: '请求日志',
+    settingKey: 'logsEnabled',
+    enabled: logsEnabled.value,
     desc: '每个请求的完整记录（含识别打分、错误详情），按天分文件',
     files: stats.value?.logs?.files ?? 0,
     bytes: stats.value?.logs?.bytes ?? 0
@@ -104,6 +116,8 @@ const STORAGE_ROWS = computed(() => [
   {
     key: 'usage',
     name: '用量记录',
+    settingKey: 'usageEnabled',
+    enabled: usageEnabled.value,
     desc: '转发到上游的请求的 tokens 记账，按天分文件；清掉后统计从零开始',
     files: stats.value?.usage?.files ?? 0,
     bytes: stats.value?.usage?.bytes ?? 0
@@ -268,6 +282,11 @@ onMounted(() => {
           <span class="setting-desc">{{ row.desc }}</span>
         </div>
         <div class="setting-control">
+          <Toggle
+            :model-value="row.enabled"
+            :disabled="configStore.saving"
+            @change="onToggleStorage(row.settingKey, $event)"
+          />
           <span class="storage-size">{{ row.files ? `${row.files} 个文件 · ${formatBytes(row.bytes)}` : '暂无数据' }}</span>
           <BaseButton
             variant="secondary"
