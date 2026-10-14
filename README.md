@@ -38,7 +38,17 @@ npm run tauri:build    # 打包 .app / .dmg（产物在 src-tauri/target/release
 
 ## 分发
 
-产物是 ad-hoc 签名、未公证，且只编了 arm64：对方第一次打开要放行一次，Intel Mac 跑不了。
+产物是 ad-hoc 签名、未公证，且只编了 arm64。**对方拿到后第一次打开会被 macOS 拦一次**：
+从浏览器/网盘/微信下来的文件带着 quarantine 标记，系统认不出签名者。放行方式三选一：
+
+- 系统设置 → 隐私与安全性 → 底部「仍要打开」（macOS 15 及以后）
+- 右键点 App → 打开（老版本 macOS）
+- 终端去掉标记：`xattr -dr com.apple.quarantine /Applications/CCProxy.app`
+
+不确定标记在不在，先看一眼：`xattr -p com.apple.quarantine /Applications/CCProxy.app`，
+有输出才需要上面第三步。
+
+只编了 arm64，Intel Mac 跑不了；要免掉「首次放行」这步得做 Developer ID 签名 + 公证。
 细节见[迁移记录的分发那节](docs/2026-10-14-electron-to-tauri.md)。
 
 ## 文档
