@@ -113,6 +113,36 @@ HOME=/tmp/ccproxy-dev CCPROXY_ALLOW_MULTI=1 \
 
 `CCPROXY_ALLOW_MULTI=1` 只是不上那把锁，其余行为不变；日常运行不需要它。
 
+## 分发与签名
+
+产物是 ad-hoc 签名（`src-tauri/tauri.conf.json` 里的 `signingIdentity: "-"`），既没有 Developer ID
+也没有公证。
+
+**发给别人之前要知道两件事。** 一是对方从浏览器/网盘/微信拿到文件会带上 quarantine 标记，
+第一次打开会被 Gatekeeper 拦一次，走「系统设置 → 隐私与安全性 → 仍要打开」放行即可
+（或者 `xattr -dr com.apple.quarantine /Applications/CCProxy.app`）。二是只编了 arm64，
+Intel Mac 跑不了——要兼容得先装 rustup、加上 `x86_64-apple-darwin` 目标，再按 universal 编。
+
+签名必须自洽：漏签的 bundle 会被系统判成「已损坏，无法打开」，那种是右键也救不回来的。
+CI 里那步 `codesign --verify` 就是守住这个回退（对外的表现差别是「无法验证开发者」还是「已损坏」）。
+
+想免掉「首次放行」这一步，得买 Apple Developer（99 美元/年）做 Developer ID 签名 + 公证，
+证书与凭据放进 Secrets 后给打包那步加上环境变量即可，位置在 release.yml 的注释里。
+
+## 在 fork 里跑 CI
+
+**fork 出来的仓库默认不跑工作流**：推 main 不会触发，要在 fork 的 Actions 标签页点一次
+「I understand my workflows, go ahead and enable them」，之后 push 才会自动跑。
+等不及也可以手动触发：
+
+```bash
+gh workflow run Release -R <owner>/CCProxy --ref main
+```
+
+发 Release 需要写权限。fork 的仓库设置里「Workflow permissions」默认是 read，
+但工作流自己声明了 `permissions: contents: write`，这条会覆盖默认值，所以不用去改设置
+（已经在 fork 上实测过：默认 read 的情况下 Release 照样发出来了）。
+
 ## 测试
 
 原 17 个 `node:test` 文件（含端到端那套 mock 上游 + 真代理的集成测试）全部按同样口径
