@@ -1,6 +1,6 @@
 [package]
 name = "ccproxy"
-version = "0.1.1"
+version = "0.2.0"
 description = "本地 AI agent 协议代理：识别协议、映射模型、替换凭据、转发上游"
 authors = ["CCProxy"]
 edition = "2021"
