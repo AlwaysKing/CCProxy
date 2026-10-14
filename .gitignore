@@ -1,8 +1,11 @@
 node_modules/
 dist/
-output/
 .DS_Store
 .vscode/
+
+# Rust / Tauri 构建产物与自动生成的 schema
+src-tauri/target/
+src-tauri/gen/
 
 # Claude Code 的本机会话设置（逐条累积的权限白名单，跟具体机器绑定），不入库
 .claude/settings.local.json
