@@ -7,6 +7,7 @@ import { useConfigStore } from '@/stores/useConfigStore'
 import { useProxyStore } from '@/stores/useProxyStore'
 import { useClientDirsStore } from '@/stores/useClientDirsStore'
 import { BaseTabs, Toggle } from '@/components/base'
+import { logger } from '@/utils/logger'
 import ProvidersView from '@/views/providers/ProvidersView.vue'
 import LogsView from '@/views/logs/LogsView.vue'
 import UsageView from '@/views/usage/UsageView.vue'
@@ -74,6 +75,12 @@ onMounted(async () => {
   // 启动就扫一遍客户端目录：有和 CCProxy 不一致的，顶栏常驻一个感叹号提醒，
   // 点它去设置页处理。配置/代理先就位，检查的口径（端口、token）才是最终的
   clientDirsStore.init()
+  // 界面起来、IPC 通了的证据落一条日志：窗口白屏或命令没注册时，翻 app.log 就知道卡在哪一步
+  logger.info('[UI] 界面已就绪', {
+    protocols: configStore.protocols.map((protocol) => protocol.id),
+    proxy: proxyStore.status,
+    configPath: configStore.configPath
+  })
 })
 
 // 协议配置（映射、模型能力）一变，目录检查的口径就过期了——codex 的模型清单
@@ -88,7 +95,7 @@ onUnmounted(() => {
 
 <template>
   <div class="app-shell">
-    <header class="app-topbar">
+    <header class="app-topbar" data-tauri-drag-region="deep">
       <span class="app-title">CCProxy</span>
 
       <div class="app-topbar-right">
@@ -164,7 +171,12 @@ onUnmounted(() => {
   height: 100%;
 }
 
-/* 全宽顶部工具条：整条可拖拽，红绿灯嵌在左侧（trafficLightPosition 18 正好落在 48px 高度的中线） */
+/* 全宽顶部工具条：整条可拖拽，红绿灯嵌在左侧（trafficLightPosition 18 正好落在 48px 高度的中线）。
+   拖拽在 WKWebView 里靠 data-tauri-drag-region 属性，写在 template 上、值给 "deep"：
+   整条子树都能拖，里面的按钮/链接等可点元素会自动挡掉拖拽，正好对应原来
+   「顶栏 drag + 右侧 no-drag」那套写法。这条属性还要配 core:window:allow-start-dragging
+   权限（见 src-tauri/capabilities/default.json），少了它按下去没反应；
+   -webkit-app-region 是 Electron 时代的写法，留着只为标注意图，不再生效 */
 .app-topbar {
   flex: 0 0 var(--header-height);
   display: flex;

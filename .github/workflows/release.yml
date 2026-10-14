@@ -1,6 +1,10 @@
-# 推 main 即编译并发布：macOS arm64 的 dmg/zip 传到以 v<package.json version> 命名的 Release。
+# 推 main 即编译并发布：macOS arm64 的 dmg 与 zip 传到以 v<package.json version> 命名的 Release。
 # 版本号没动就重推 main 时，会覆盖同名 Release 的附件（不会堆出多个 release）——
-# 要出新版本，先改 package.json 的 version 再推。
+# 要出新版本，先改 package.json 的 version 再推（src-tauri/tauri.conf.json 的 version 指向它，两处不会漂）。
+#
+# fork 出来第一次跑之前，仓库设置里有两件事要确认（fork 默认都是关的）：
+#   1. Actions 标签页点一下「I understand my workflows, go ahead and enable them」
+#   2. Settings → Actions → General → Workflow permissions 选 “Read and write”（发 Release 要写权限）
 name: Release
 
 on:
@@ -29,9 +33,18 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Rust 工具链：单元测试与打包都要用
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
       - name: 安装依赖
         run: npm ci
 
+      # cargo test 编译的是 debug 侧，前端 dist 这时还不存在也没关系；
+      # 发布用的是 release 侧，tauri build 会先跑 beforeBuildCommand（npm run build）再编译
       - name: 单元测试
         run: npm test
 
@@ -39,14 +52,23 @@ jobs:
         id: pkg
         run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
-      - name: 构建渲染层
-        run: npm run build
+      # 签名身份走 tauri.conf.json 的 signingIdentity（ad-hoc），这里不用再传。
+      # 将来买了 Developer ID，把证书与公证凭据放进 Secrets，并给这步加上：
+      #   env:
+      #     APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
+      #     APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
+      - name: 打包 macOS arm64（app + dmg）
+        # CI 环境下 Tauri 会自动跳过 dmg 的 Finder 美化那步（osascript），不需要图形会话
+        run: npx tauri build --bundles app,dmg
 
-      - name: 打包 macOS arm64
-        # 没配签名证书，关掉 electron-builder 的签名自动发现，免得它去找钥匙串
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx electron-builder --mac --arm64 --publish never
+      # 签名不自洽的包，对方下载后会被系统判成「已损坏」而不是「无法验证开发者」；
+      # 这条守住这个回退（漏签名时这里会直接失败）
+      - name: 校验签名自洽
+        run: codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/CCProxy.app
+
+      - name: 压缩 .app
+        # ditto 会保留 .app 里的符号链接与权限，比 zip 更适合打包 bundle
+        run: ditto -c -k --sequesterRsrc --keepParent src-tauri/target/release/bundle/macos/CCProxy.app CCProxy.app.zip
 
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
@@ -55,5 +77,6 @@ jobs:
           name: CCProxy v${{ steps.pkg.outputs.version }}
           generate_release_notes: true
           files: |
-            output/*.dmg
-            output/*.zip
+            src-tauri/target/release/bundle/dmg/*.dmg
+            CCProxy.app.zip
+

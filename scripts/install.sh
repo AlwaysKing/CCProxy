@@ -11,8 +11,8 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# 查找构建产物
-APP_PATH=$(ls -d output/mac*/CCProxy.app 2>/dev/null | head -1)
+# 查找构建产物（Tauri 的 app bundle 位置）
+APP_PATH=$(ls -d src-tauri/target/release/bundle/macos/CCProxy.app 2>/dev/null | head -1)
 
 if [ -z "$APP_PATH" ]; then
     echo -e "${RED}✗ 未找到构建产物，请先运行 ./scripts/rebuild.sh${NC}"
@@ -43,3 +43,4 @@ echo -e "${GREEN}   ✓ 安装完成${NC}"
 echo -e "${GREEN}═══════════════════════════════════════${NC}"
 echo ""
 echo -e "${BLUE}运行 'open /Applications/CCProxy.app' 启动应用${NC}"
+

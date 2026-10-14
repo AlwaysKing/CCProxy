@@ -3,6 +3,11 @@
 日期：2026-09-21
 状态：已与用户逐节确认
 
+> 2026-10-14 补记：技术栈已从 Electron 换成 Tauri v2 + Rust 后端（本文描述的界面、配置结构、
+> 请求管线与验收口径都没变）。壳与后端的模块对应关系见
+> [Electron → Tauri 迁移记录](../../2026-10-14-electron-to-tauri.md)；
+> 本文中 `electron/` 下的路径是迁移前的历史记录。
+
 ## 一句话
 
 本地单端口 AI agent 协议代理：识别进来的请求属于哪个协议（Anthropic / OpenAI），按该协议的映射表把客户端模型名换成真实供应商 + 真实模型名 + 真实 token，转发上游并透传 SSE。界面仿照 CC Switch。Electron + Vue 3 + 纯 JS，分层习惯与 CCGUI 一致。
