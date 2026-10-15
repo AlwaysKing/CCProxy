@@ -45,7 +45,9 @@ export function formatTokens(value) {
   const number = Number(value)
   if (!Number.isFinite(number)) return '—'
   if (number < 10000) return number.toLocaleString('zh-CN')
-  if (number < 1000000) return `${(number / 1000).toFixed(1)}k`
+  // 分档看的是「四舍五入之后」的量级：999,950 除以千是 999.95，toFixed(1) 会凑成 1000.0k，
+  // 这种写法既没意义又比 M 长，所以从它开始就进位到 M
+  if (number < 999950) return `${(number / 1000).toFixed(1)}k`
   return `${(number / 1000000).toFixed(2)}M`
 }
 

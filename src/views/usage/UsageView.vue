@@ -125,9 +125,13 @@ onMounted(() => {
                 {{ formatNumber(row.bucket.failed) }}
               </td>
               <td class="col-num cell-muted">{{ formatNumber(row.bucket.cancelled) }}</td>
-              <td class="col-num">{{ formatNumber(row.bucket.input) }}</td>
-              <td class="col-num cell-muted">{{ formatNumber(row.bucket.cacheRead) }}</td>
-              <td class="col-num">{{ formatNumber(row.bucket.output) }}</td>
+              <!-- tokens 列跟上面的汇总卡片用同一套口径：超过万位就该收成 K/M，
+                   不然一行十位数会把列撑歪。精确值挂在悬停上，不用为了看个全量数字去别处翻 -->
+              <td class="col-num" :title="formatNumber(row.bucket.input)">{{ formatTokens(row.bucket.input) }}</td>
+              <td class="col-num cell-muted" :title="formatNumber(row.bucket.cacheRead)">
+                {{ formatTokens(row.bucket.cacheRead) }}
+              </td>
+              <td class="col-num" :title="formatNumber(row.bucket.output)">{{ formatTokens(row.bucket.output) }}</td>
             </tr>
           </tbody>
         </table>
