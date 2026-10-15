@@ -31,6 +31,8 @@ export function formatDuration(ms) {
 }
 
 export function formatNumber(value) {
+  // null/undefined 是「上游没上报」，与 0 不是一回事：直接当 0 显示会让人以为真没有消耗
+  if (value === null || value === undefined) return '—'
   const number = Number(value)
   if (!Number.isFinite(number)) return '—'
   return number.toLocaleString('zh-CN')

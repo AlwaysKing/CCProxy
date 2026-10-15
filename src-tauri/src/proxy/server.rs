@@ -502,7 +502,7 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
                 let tokens = rewriter
                     .as_ref()
                     .and_then(|rewriter| rewriter.usage())
-                    .map(|usage| json!({ "input": usage.input, "output": usage.output }));
+                    .map(|usage| usage.to_json());
                 build_entry(outcome, tokens);
             }) as Box<dyn FnOnce(ForwardOutcome) + Send>
         })));
@@ -548,7 +548,7 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
     let tokens = rewriter
         .as_ref()
         .and_then(|rewriter| rewriter.usage())
-        .map(|usage| json!({ "input": usage.input, "output": usage.output }));
+        .map(|usage| usage.to_json());
     build_entry(ForwardOutcome { status_code: status, error: None, cancelled: false }, tokens);
 
     let mut builder = Response::builder().status(status);

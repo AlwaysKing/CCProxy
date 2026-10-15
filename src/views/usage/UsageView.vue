@@ -28,7 +28,7 @@ const PROTOCOL_LABELS = { anthropic: 'Anthropic', openai: 'OpenAI' }
 
 const DIMENSION_LABELS = { day: '日期', provider: '供应商', model: '模型' }
 
-const EMPTY_TOTALS = { requests: 0, failed: 0, cancelled: 0, input: 0, output: 0 }
+const EMPTY_TOTALS = { requests: 0, failed: 0, cancelled: 0, input: 0, output: 0, cacheRead: null }
 
 const hasData = computed(() => (usageStore.totals?.requests ?? 0) > 0)
 
@@ -38,12 +38,14 @@ const summary = computed(() => {
     { label: '请求数', value: formatNumber(totals.requests) },
     { label: '上游失败', value: formatNumber(totals.failed), tone: totals.failed > 0 ? 'error' : '' },
     { label: '已取消', value: formatNumber(totals.cancelled) },
-    { label: '输入 tokens', value: formatTokens(totals.input) },
+    { label: '输入 tokens', value: formatTokens(totals.input), title: '含缓存命中与写入的全部输入' },
+    { label: '缓存读', value: formatTokens(totals.cacheRead), title: '输入里命中缓存的部分（Anthropic 的 cache_read、OpenAI 的 cached_tokens）' },
     { label: '输出 tokens', value: formatTokens(totals.output) }
   ]
 })
 
-// 消耗按「输入 + 输出」算总账：图表比的是谁吃得多，只算输出会把输入大的模型看小
+// 「输入」是含缓存的全部输入，缓存读写是它里面的明细：所以总账仍然是输入 + 输出，
+// 缓存那一份已经在输入里了，再加一次就是重复计数
 const protocolSegments = computed(() =>
   usageStore.byProtocol.map((item) => ({
     key: item.key,
@@ -111,6 +113,7 @@ onMounted(() => {
               <th class="col-num">失败</th>
               <th class="col-num">取消</th>
               <th class="col-num">输入</th>
+              <th class="col-num" title="输入里命中缓存的部分">缓存读</th>
               <th class="col-num">输出</th>
             </tr>
           </thead>
@@ -123,6 +126,7 @@ onMounted(() => {
               </td>
               <td class="col-num cell-muted">{{ formatNumber(row.bucket.cancelled) }}</td>
               <td class="col-num">{{ formatNumber(row.bucket.input) }}</td>
+              <td class="col-num cell-muted">{{ formatNumber(row.bucket.cacheRead) }}</td>
               <td class="col-num">{{ formatNumber(row.bucket.output) }}</td>
             </tr>
           </tbody>

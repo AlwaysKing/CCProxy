@@ -77,7 +77,8 @@ fn to_usage_record(entry: &Value) -> Value {
         "realModel": entry.get("realModel").cloned().unwrap_or(Value::Null),
         "status": status,
         "input": tokens.and_then(|value| value.get("input")).cloned().unwrap_or(Value::Null),
-        "output": tokens.and_then(|value| value.get("output")).cloned().unwrap_or(Value::Null)
+        "output": tokens.and_then(|value| value.get("output")).cloned().unwrap_or(Value::Null),
+        "cacheRead": tokens.and_then(|value| value.get("cacheRead")).cloned().unwrap_or(Value::Null)
     })
 }
 
@@ -88,6 +89,7 @@ struct Bucket {
     cancelled: i64,
     input: i64,
     output: i64,
+    cache_read: i64,
 }
 
 impl Bucket {
@@ -97,7 +99,8 @@ impl Bucket {
             "failed": self.failed,
             "cancelled": self.cancelled,
             "input": self.input,
-            "output": self.output
+            "output": self.output,
+            "cacheRead": self.cache_read
         })
     }
 }
@@ -124,6 +127,9 @@ fn add_to_bucket(bucket: &mut Bucket, record: &Value) {
     }
     if let Some(output) = number_or_null(record.get("output")) {
         bucket.output += output;
+    }
+    if let Some(cache_read) = number_or_null(record.get("cacheRead")) {
+        bucket.cache_read += cache_read;
     }
 }
 

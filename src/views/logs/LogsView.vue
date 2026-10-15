@@ -71,6 +71,13 @@ const filtered = computed(() =>
   })
 )
 
+// 输入是含缓存的全部输入，命中缓存的那部分跟在后面当明细；没上报的就只报输入与输出
+function tokenSummary(tokens) {
+  const head = `输入 ${formatNumber(tokens.input)} / 输出 ${formatNumber(tokens.output)}`
+  if (tokens.cacheRead === null || tokens.cacheRead === undefined) return head
+  return `${head}（缓存读 ${formatNumber(tokens.cacheRead)}）`
+}
+
 // 详情按行铺开：字段名与日志 entry 一一对应，排查时对着这里就能说出「当时到底怎么了」
 const detailRows = computed(() => {
   const entry = detail.value
@@ -89,9 +96,7 @@ const detailRows = computed(() => {
     { label: '耗时', value: formatDuration(entry.durationMs) },
     {
       label: 'tokens',
-      value: entry.tokens
-        ? `输入 ${formatNumber(entry.tokens.input)} / 输出 ${formatNumber(entry.tokens.output)}`
-        : '上游未上报'
+      value: entry.tokens ? tokenSummary(entry.tokens) : '上游未上报'
     },
     { label: '错误', value: entry.error || '—' }
   ]

@@ -109,7 +109,7 @@ fn aggregation_buckets_by_day_protocol_provider_model_and_cancel_is_not_failure(
     let log = log_in(&dir, None);
     let now = now_ms();
     log.record(
-        &forwarded(json!({ "timestamp": now, "protocol": "anthropic", "providerName": "A", "realModel": "glm-4.6", "tokens": { "input": 100, "output": 50 } })),
+        &forwarded(json!({ "timestamp": now, "protocol": "anthropic", "providerName": "A", "realModel": "glm-4.6", "tokens": { "input": 100, "output": 50, "cacheRead": 1000 } })),
         true,
         true,
     );
@@ -130,6 +130,7 @@ fn aggregation_buckets_by_day_protocol_provider_model_and_cancel_is_not_failure(
     assert_eq!(usage["totals"]["cancelled"], json!(1));
     assert_eq!(usage["totals"]["input"], json!(111));
     assert_eq!(usage["totals"]["output"], json!(56));
+    assert_eq!(usage["totals"]["cacheRead"], json!(1000));
 
     let find = |key: &str, bucket: &str| -> Value {
         usage[bucket]
@@ -141,7 +142,10 @@ fn aggregation_buckets_by_day_protocol_provider_model_and_cancel_is_not_failure(
             .unwrap_or(Value::Null)
     };
     assert_eq!(find("anthropic", "byProtocol")["output"], json!(50));
+    assert_eq!(find("anthropic", "byProtocol")["cacheRead"], json!(1000));
     assert_eq!(find("B", "byProvider")["requests"], json!(2));
+    // 没上报缓存的记录按 0 计入，不会把整桶变成 null
+    assert_eq!(find("B", "byProvider")["cacheRead"], json!(0));
     // 模型维度把两个协议的 glm-4.6 合在一起：同一个模型走哪个协议都是同一个模型
     assert_eq!(find("glm-4.6", "byModel")["requests"], json!(2));
     assert_eq!(find("glm-4.6", "byModel")["input"], json!(110));
