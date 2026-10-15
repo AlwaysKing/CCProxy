@@ -6,10 +6,11 @@
 use axum::http::HeaderMap;
 use serde_json::{json, Value};
 
-use crate::config::{AppConfig, Protocol};
+use crate::config::{AppConfig, Protocol, Provider};
 
-// 与 router 的可用性口径一致：映射启用、供应商存在且启用才算可路由
-pub fn usable_client_models(protocol: &Protocol) -> Vec<String> {
+// 与 router 的可用性口径一致：映射启用、供应商存在且启用才算可路由。
+// 供应商来自配置顶层的全局池
+pub fn usable_client_models(protocol: &Protocol, providers: &[Provider]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for mapping in &protocol.mappings {
         if !mapping.enabled {
@@ -19,7 +20,7 @@ pub fn usable_client_models(protocol: &Protocol) -> Vec<String> {
         if mapping.client_model.is_empty() || mapping.client_model.contains('*') {
             continue;
         }
-        let Some(provider) = protocol.providers.iter().find(|item| item.id == mapping.provider_id) else {
+        let Some(provider) = providers.iter().find(|item| item.id == mapping.provider_id) else {
             continue;
         };
         if !provider.enabled {
@@ -86,7 +87,7 @@ pub fn resolve_client_protocol(headers: &HeaderMap) -> String {
     if headers.contains_key("anthropic-version") || headers.contains_key("x-api-key") {
         "anthropic".to_string()
     } else {
-        "openai".to_string()
+        "openai_chat".to_string()
     }
 }
 
@@ -127,7 +128,7 @@ pub fn build_models_response(config: &AppConfig, protocol_id: &str, model_id: Op
         );
     }
 
-    let names = usable_client_models(protocol);
+    let names = usable_client_models(protocol, &config.providers);
 
     // 单模型查询：列表里有就返回单项，没有返回协议各自的 404 形态
     if let Some(model_id) = model_id {

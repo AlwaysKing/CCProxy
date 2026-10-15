@@ -28,7 +28,7 @@ fn first_run_returns_defaults() {
     assert!(!result.recovered);
     assert_eq!(result.config.settings.port, DEFAULT_PORT);
     let ids: Vec<&str> = result.config.protocols.iter().map(|item| item.id.as_str()).collect();
-    assert_eq!(ids, vec!["anthropic", "openai"]);
+    assert_eq!(ids, vec!["anthropic", "openai_chat", "openai_responses"]);
 }
 
 #[test]
@@ -45,7 +45,9 @@ fn saved_config_round_trips() {
     manager.save(&serde_json::to_value(&config).unwrap()).unwrap();
 
     let reloaded = manager.load();
-    assert_eq!(reloaded.config.protocols[0].providers[0].id, "p_zhipu");
+    assert_eq!(reloaded.config.providers[0].id, "p_zhipu");
+    // 老结构（供应商挂在协议下）迁移后按归属协议推断上游格式
+    assert_eq!(reloaded.config.providers[0].api_format, "anthropic");
     assert_eq!(reloaded.config.protocols[0].mappings[0].client_model, "claude-*");
 }
 
@@ -107,7 +109,7 @@ fn unknown_protocol_is_dropped_with_issue() {
     }));
     let config = result.config.unwrap();
     let ids: Vec<&str> = config.protocols.iter().map(|item| item.id.as_str()).collect();
-    assert_eq!(ids, vec!["anthropic", "openai"]);
+    assert_eq!(ids, vec!["anthropic", "openai_chat", "openai_responses"]);
     assert!(result.issues.iter().any(|issue| issue.contains("gemini")));
 }
 
@@ -120,10 +122,10 @@ fn provider_without_base_url_and_mapping_without_provider_are_dropped() {
             "mappings": [mapping("m1", "a", "ok"), { "id": "m2", "clientModel": "b", "realModel": "x" }]
         }]
     }));
-    let protocol = &result.config.unwrap().protocols[0];
-    let providers: Vec<&str> = protocol.providers.iter().map(|item| item.id.as_str()).collect();
+    let config = result.config.unwrap();
+    let providers: Vec<&str> = config.providers.iter().map(|item| item.id.as_str()).collect();
     assert_eq!(providers, vec!["ok"]);
-    let mappings: Vec<&str> = protocol.mappings.iter().map(|item| item.id.as_str()).collect();
+    let mappings: Vec<&str> = config.protocols[0].mappings.iter().map(|item| item.id.as_str()).collect();
     assert_eq!(mappings, vec!["m1"]);
 }
 
@@ -152,7 +154,7 @@ fn model_entries_accept_old_and_new_shapes() {
             "mappings": []
         }]
     }));
-    let models = &result.config.unwrap().protocols[1].providers[0].models;
+    let models = &result.config.unwrap().providers[0].models;
     let serialized: Value = serde_json::to_value(models).unwrap();
     assert_eq!(
         serialized,
@@ -180,7 +182,7 @@ fn invalid_model_fields_drop_only_the_field() {
             "mappings": []
         }]
     }));
-    let models = &result.config.unwrap().protocols[0].providers[0].models;
+    let models = &result.config.unwrap().providers[0].models;
     let serialized: Value = serde_json::to_value(models).unwrap();
     assert_eq!(
         serialized,
@@ -212,7 +214,7 @@ fn blank_windows_are_not_written_back_and_modalities_are_deduped() {
             "mappings": []
         }]
     }));
-    let serialized: Value = serde_json::to_value(&result.config.unwrap().protocols[1].providers[0].models).unwrap();
+    let serialized: Value = serde_json::to_value(&result.config.unwrap().providers[0].models).unwrap();
     assert_eq!(serialized, json!([{ "name": "a", "inputModalities": ["text", "image"] }]));
 }
 
@@ -276,6 +278,231 @@ fn client_token_is_trimmed_and_invalid_values_become_empty() {
         assert_eq!(result.config.unwrap().settings.client_token, "");
     }
     assert_eq!(validate_config(&json!({})).config.unwrap().settings.client_token, "");
+}
+
+#[test]
+fn legacy_config_hoists_providers_and_splits_openai() {
+    let result = validate_config(&json!({
+        "protocols": [
+            {
+                "id": "anthropic", "name": "Anthropic", "enabled": true,
+                "providers": [provider("p_claude", json!(["glm-4.6"]))],
+                "mappings": [mapping("m1", "claude-*", "p_claude")]
+            },
+            {
+                "id": "openai", "name": "OpenAI", "enabled": true,
+                "providers": [provider("p_codex", json!(["gpt-5.5"]))],
+                "mappings": [mapping("m2", "gpt-5*", "p_codex")]
+            }
+        ]
+    }));
+    let config = result.config.unwrap();
+
+    // OpenAI 拆成两条，原映射各复制一份
+    let ids: Vec<&str> = config.protocols.iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(ids, vec!["anthropic", "openai_chat", "openai_responses"]);
+    assert_eq!(config.protocols[1].mappings[0].client_model, "gpt-5*");
+    assert_eq!(config.protocols[2].mappings[0].client_model, "gpt-5*");
+
+    // 供应商升到顶层；格式按归属协议推断：Anthropic 那条明确，老的 openai 那条只能取 auto
+    let formats: Vec<(&str, &str)> = config
+        .providers
+        .iter()
+        .map(|item| (item.id.as_str(), item.api_format.as_str()))
+        .collect();
+    assert_eq!(formats, vec![("p_claude", "anthropic"), ("p_codex", "auto")]);
+
+    // 迁移要有交代，但不能把老的 openai 条目报成「不支持的协议」
+    assert!(result.issues.iter().any(|issue| issue.contains("供应商已升为全局")));
+    assert!(result.issues.iter().any(|issue| issue.contains("OpenAI 协议已拆成")));
+    assert!(!result.issues.iter().any(|issue| issue.contains("丢弃不支持的协议")));
+}
+
+#[test]
+fn unknown_api_format_falls_back_to_auto() {
+    let result = validate_config(&json!({
+        "providers": [
+            { "id": "p1", "name": "p1", "baseUrl": "http://a", "apiFormat": "gemini", "models": ["m"] }
+        ]
+    }));
+    let config = result.config.unwrap();
+    assert_eq!(config.providers[0].api_format, "auto");
+    assert!(result.issues.iter().any(|issue| issue.contains("apiFormat")));
+}
+
+#[test]
+fn new_shape_providers_are_read_from_the_top_level() {
+    let result = validate_config(&json!({
+        "providers": [provider("p_new", json!(["m"]))],
+        "protocols": [{
+            "id": "openai_responses", "enabled": true,
+            "mappings": [mapping("m1", "gpt-5*", "p_new")]
+        }]
+    }));
+    let config = result.config.unwrap();
+    assert_eq!(config.providers.len(), 1);
+    assert_eq!(config.providers[0].api_format, "auto");
+    assert_eq!(config.protocols[2].mappings.len(), 1);
+    // 新结构下不该出现迁移提示
+    assert!(!result.issues.iter().any(|issue| issue.contains("已升为全局")));
+}
+
+#[test]
+fn colliding_provider_ids_are_split_and_mappings_follow() {
+    let result = validate_config(&json!({
+        "protocols": [
+            {
+                "id": "anthropic", "enabled": true,
+                "providers": [{ "id": "p1", "name": "A家", "baseUrl": "http://a", "token": "t1", "models": ["m"] }],
+                "mappings": [mapping("m1", "claude-*", "p1")]
+            },
+            {
+                "id": "openai", "enabled": true,
+                "providers": [{ "id": "p1", "name": "B家", "baseUrl": "http://b", "token": "t2", "models": ["m"] }],
+                "mappings": [mapping("m2", "gpt-*", "p1")]
+            }
+        ]
+    }));
+    let config = result.config.unwrap();
+
+    // 同一个 id 在老配置的两个协议下指向不同上游：拆成两条，不能悄悄合成一条
+    let pairs: Vec<(&str, &str)> = config
+        .providers
+        .iter()
+        .map(|item| (item.id.as_str(), item.base_url.as_str()))
+        .collect();
+    assert_eq!(pairs, vec![("p1", "http://a"), ("p1_2", "http://b")]);
+
+    // 各协议内的映射按原来的指向改指：anthropic 仍指向 A 家，拆出来的两条指向 B 家
+    assert_eq!(config.protocols[0].mappings[0].provider_id, "p1");
+    assert_eq!(config.protocols[1].mappings[0].provider_id, "p1_2");
+    assert_eq!(config.protocols[2].mappings[0].provider_id, "p1_2");
+    assert!(result.issues.iter().any(|issue| issue.contains("已拆成 p1_2")));
+}
+
+#[test]
+fn same_id_with_different_inferred_format_is_not_merged() {
+    // 地址与 token 一样，但一个在老 anthropic 协议下（推断成 anthropic 格式）、一个在老 openai
+    // 协议下（推断成 auto）。合并会让其中一侧从直通变成转换，属于静默的行为变化，所以照样拆开
+    let result = validate_config(&json!({
+        "protocols": [
+            {
+                "id": "anthropic", "enabled": true,
+                "providers": [{ "id": "p1", "baseUrl": "http://same", "token": "t", "models": ["m"] }],
+                "mappings": []
+            },
+            {
+                "id": "openai", "enabled": true,
+                "providers": [{ "id": "p1", "baseUrl": "http://same", "token": "t", "models": ["m"] }],
+                "mappings": []
+            }
+        ]
+    }));
+    let config = result.config.unwrap();
+    let formats: Vec<(&str, &str)> = config
+        .providers
+        .iter()
+        .map(|item| (item.id.as_str(), item.api_format.as_str()))
+        .collect();
+    assert_eq!(formats, vec![("p1", "anthropic"), ("p1_2", "auto")]);
+}
+
+#[test]
+fn legacy_entry_fills_the_empty_slot_and_is_otherwise_ignored() {
+    let result = validate_config(&json!({
+        "providers": [provider("p1", json!(["m"]))],
+        "protocols": [
+            { "id": "openai_chat", "enabled": true, "mappings": [mapping("m1", "gpt-4*", "p1")] },
+            { "id": "openai", "enabled": true, "mappings": [mapping("m9", "legacy-*", "p1")] }
+        ]
+    }));
+    let config = result.config.unwrap();
+
+    // 拆分后的条目说了算：chat 那条用新的映射
+    assert_eq!(config.protocols[1].mappings[0].client_model, "gpt-4*");
+    // responses 那条没有自己的条目，从老的 openai 条目补上（总比空着强）
+    assert_eq!(config.protocols[2].mappings[0].client_model, "legacy-*");
+    assert!(result.issues.iter().any(|issue| issue.contains("老条目及其映射已被忽略")));
+}
+
+#[test]
+fn loading_a_legacy_file_backs_it_up_and_writes_the_new_shape() {
+    let dir = TempDir::new("ccproxy-cfg");
+    let manager = manager(&dir);
+    let legacy = json!({
+        "version": 1,
+        "settings": { "port": 19000, "clientToken": "sk-token" },
+        "protocols": [{
+            "id": "anthropic", "name": "Anthropic", "enabled": true,
+            "providers": [provider("p_zhipu", json!(["glm-4.6"]))],
+            "mappings": [mapping("m1", "claude-*", "p_zhipu")]
+        }]
+    });
+    let legacy_text = serde_json::to_string_pretty(&legacy).unwrap();
+    dir.write("app.json", &legacy_text);
+
+    let loaded = manager.load();
+    assert!(!loaded.recovered);
+    assert_eq!(loaded.config.settings.port, 19000);
+    assert_eq!(loaded.config.settings.client_token, "sk-token");
+    assert_eq!(loaded.config.providers[0].id, "p_zhipu");
+    assert!(loaded
+        .issues
+        .iter()
+        .any(|issue| issue.contains("已把旧版配置升级为新结构")));
+
+    // 原文件原样留了一份备份，用户手上还有能照着改回去的旧结构
+    assert_eq!(std::fs::read_to_string(dir.join("app.json.v1.bak")).unwrap(), legacy_text);
+
+    // 落盘的是新结构：供应商在顶层、协议下没有 providers、版本号 2，其余设置原样保留
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
+    assert_eq!(saved["version"], json!(2));
+    assert_eq!(saved["providers"][0]["apiFormat"], json!("anthropic"));
+    assert!(saved["protocols"][0].get("providers").is_none());
+    assert_eq!(saved["settings"]["port"], json!(19000));
+    assert_eq!(saved["settings"]["clientToken"], json!("sk-token"));
+
+    // 再读一次不再触发升级（幂等），内容也不变
+    let again = manager.load();
+    assert!(!again.issues.iter().any(|issue| issue.contains("升级为新结构")));
+    assert_eq!(again.config.providers.len(), 1);
+    assert_eq!(again.config.protocols[0].mappings.len(), 1);
+}
+
+#[test]
+fn protocol_names_come_from_the_presets() {
+    // 老配置里那条 openai 的 name 是 "OpenAI"：拆成两条后如果继承它，
+    // 顶栏 Tab 上会出现两个一模一样的「OpenAI」，分不出在配哪条
+    let result = validate_config(&json!({
+        "protocols": [{ "id": "openai", "name": "OpenAI", "enabled": true, "providers": [], "mappings": [] }]
+    }));
+    let config = result.config.unwrap();
+    let names: Vec<&str> = config.protocols.iter().map(|item| item.name.as_str()).collect();
+    assert_eq!(names, vec!["Anthropic", "OpenAI Chat", "OpenAI Responses"]);
+
+    // 手改过的名字也不采纳：协议名是预设，不是配置项
+    let hand_edited = validate_config(&json!({
+        "protocols": [{ "id": "anthropic", "name": "我自己起的名字", "enabled": true, "mappings": [] }]
+    }));
+    assert_eq!(hand_edited.config.unwrap().protocols[0].name, "Anthropic");
+}
+
+#[test]
+fn nested_providers_are_ignored_when_the_top_level_pool_exists() {
+    let result = validate_config(&json!({
+        "providers": [provider("p_new", json!(["m"]))],
+        "protocols": [{
+            "id": "anthropic", "enabled": true,
+            "providers": [provider("p_stale", json!(["m2"]))],
+            "mappings": [mapping("m1", "claude-*", "p_new")]
+        }]
+    }));
+    let config = result.config.unwrap();
+    // 顶层池是唯一真源：协议下那份老数据不会被提升回来，否则等于把已经删掉的供应商救活
+    let ids: Vec<&str> = config.providers.iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(ids, vec!["p_new"]);
+    assert_eq!(config.protocols[0].mappings.len(), 1);
+    assert!(result.issues.iter().any(|issue| issue.contains("以顶层为准")));
 }
 
 #[test]

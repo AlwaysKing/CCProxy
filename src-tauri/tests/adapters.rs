@@ -51,7 +51,7 @@ fn anthropic_adapter_injects_x_api_key() {
 
 #[test]
 fn openai_adapter_injects_bearer() {
-    let adapter = get_adapter("openai").unwrap();
+    let adapter = get_adapter("openai_chat").unwrap();
     let mut map = HeaderMap::new();
     adapter.apply_auth(&mut map, "sk-real");
     assert_eq!(map.get("authorization").unwrap(), "Bearer sk-real");
@@ -60,7 +60,7 @@ fn openai_adapter_injects_bearer() {
 
 #[test]
 fn both_adapters_rewrite_top_level_model() {
-    for id in ["anthropic", "openai"] {
+    for id in ["anthropic", "openai_chat", "openai_responses"] {
         let adapter = get_adapter(id).unwrap();
         let mut payload = json!({ "model": "claude-sonnet-4", "messages": [{ "role": "user", "content": "hi" }] });
         adapter.rewrite_model(&mut payload, "glm-4.6");
@@ -73,6 +73,61 @@ fn both_adapters_rewrite_top_level_model() {
 fn unknown_protocol_errors() {
     let error = get_adapter("gemini").unwrap_err();
     assert!(error.contains("未知协议"));
+}
+
+#[test]
+fn anthropic_upstream_gets_a_default_version_header() {
+    // 客户端是 Codex 时不会带 anthropic-version，Anthropic 上游会拒，所以要补默认值
+    let adapter = get_adapter("anthropic").unwrap();
+    let mut map = HeaderMap::new();
+    adapter.apply_auth(&mut map, "sk-real");
+    assert_eq!(map.get("anthropic-version").unwrap(), "2023-06-01");
+
+    // 客户端已经带了就透传它的值，不覆盖
+    let mut map = HeaderMap::new();
+    map.insert("anthropic-version", "2023-01-01".parse().unwrap());
+    adapter.apply_auth(&mut map, "sk-real");
+    assert_eq!(map.get("anthropic-version").unwrap(), "2023-01-01");
+}
+
+#[test]
+fn openai_formats_do_not_add_anthropic_version() {
+    for id in ["openai_chat", "openai_responses"] {
+        let adapter = get_adapter(id).unwrap();
+        let mut map = HeaderMap::new();
+        adapter.apply_auth(&mut map, "sk-real");
+        assert!(map.get("anthropic-version").is_none(), "{id} 不该带 anthropic-version");
+    }
+}
+
+#[test]
+fn upstream_path_keeps_the_client_path_when_formats_match() {
+    let anthropic = get_adapter("anthropic").unwrap();
+    assert_eq!(anthropic.upstream_path("/v1/messages"), "/v1/messages");
+    // 子路径要保住：count_tokens 走的是同族端点
+    assert_eq!(anthropic.upstream_path("/v1/messages/count_tokens"), "/v1/messages/count_tokens");
+
+    let chat = get_adapter("openai_chat").unwrap();
+    assert_eq!(chat.upstream_path("/v1/chat/completions"), "/v1/chat/completions");
+    assert_eq!(chat.upstream_path("/v1/embeddings"), "/v1/embeddings");
+
+    let responses = get_adapter("openai_responses").unwrap();
+    assert_eq!(responses.upstream_path("/v1/responses?stream=true"), "/v1/responses?stream=true");
+}
+
+#[test]
+fn upstream_path_switches_endpoint_across_formats() {
+    // 客户端 Anthropic、上游 Chat：换成 chat 的规范端点，查询串跟着走
+    let chat = get_adapter("openai_chat").unwrap();
+    assert_eq!(chat.upstream_path("/v1/messages?beta=true"), "/v1/chat/completions?beta=true");
+    assert_eq!(chat.upstream_path("/v1/messages/count_tokens"), "/v1/chat/completions");
+
+    let responses = get_adapter("openai_responses").unwrap();
+    assert_eq!(responses.upstream_path("/v1/messages"), "/v1/responses");
+
+    let anthropic = get_adapter("anthropic").unwrap();
+    assert_eq!(anthropic.upstream_path("/v1/chat/completions"), "/v1/messages");
+    assert_eq!(anthropic.upstream_path("/v1/responses"), "/v1/messages");
 }
 
 #[test]
@@ -115,7 +170,7 @@ fn anthropic_stream_rewrites_only_message_start_model() {
 
 #[test]
 fn openai_stream_rewrites_every_data_line() {
-    let rewriter = ResponseRewriter::new(get_adapter("openai").unwrap(), "gpt-4o-proxy");
+    let rewriter = ResponseRewriter::new(get_adapter("openai_chat").unwrap(), "gpt-4o-proxy");
     let event = Bytes::from_static(b"data: {\"id\":\"x\",\"model\":\"deepseek-chat\",\"choices\":[]}\n\ndata: [DONE]\n\n");
     let out = String::from_utf8(rewriter.rewrite_sse_event(&event).to_vec()).unwrap();
     let lines: Vec<&str> = out.split('\n').collect();
@@ -128,7 +183,7 @@ fn openai_stream_rewrites_every_data_line() {
 // 终止事件都是这个形状），只在顶层换名的话客户端会看到上游真实模型名
 #[test]
 fn openai_responses_stream_rewrites_nested_model() {
-    let rewriter = ResponseRewriter::new(get_adapter("openai").unwrap(), "cn:deepseek-v4-flash");
+    let rewriter = ResponseRewriter::new(get_adapter("openai_chat").unwrap(), "cn:deepseek-v4-flash");
     let event = Bytes::from_static(
         b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"deepseek-v4.1-flash\",\"status\":\"in_progress\",\"usage\":null},\"sequence_number\":0}\n\n",
     );
@@ -234,7 +289,7 @@ fn anthropic_stream_keeps_input_and_cache_when_delta_only_reports_output() {
 
 #[test]
 fn openai_usage_from_prompt_and_completion_tokens() {
-    let rewriter = ResponseRewriter::new(get_adapter("openai").unwrap(), "gpt-4o-proxy");
+    let rewriter = ResponseRewriter::new(get_adapter("openai_chat").unwrap(), "gpt-4o-proxy");
     let body = Bytes::from(
         serde_json::to_vec(&json!({ "model": "glm", "usage": { "prompt_tokens": 9, "completion_tokens": 8 } })).unwrap(),
     );
@@ -247,7 +302,7 @@ fn openai_usage_from_prompt_and_completion_tokens() {
 // 而 prompt_tokens 已经含了它——缓存只做明细，不能加进 input
 #[test]
 fn openai_chat_usage_reads_cached_tokens_from_details() {
-    let rewriter = ResponseRewriter::new(get_adapter("openai").unwrap(), "gpt-4o-proxy");
+    let rewriter = ResponseRewriter::new(get_adapter("openai_chat").unwrap(), "gpt-4o-proxy");
     let body = Bytes::from(
         serde_json::to_vec(&json!({
             "model": "glm",
@@ -267,7 +322,7 @@ fn openai_chat_usage_reads_cached_tokens_from_details() {
 
 #[test]
 fn openai_stream_usage_only_when_last_frame_reports() {
-    let rewriter = ResponseRewriter::new(get_adapter("openai").unwrap(), "gpt-4o-proxy");
+    let rewriter = ResponseRewriter::new(get_adapter("openai_chat").unwrap(), "gpt-4o-proxy");
     rewriter.rewrite_sse_event(b"data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n");
     assert!(rewriter.usage().is_none());
     rewriter.rewrite_sse_event(
@@ -281,7 +336,7 @@ fn openai_stream_usage_only_when_last_frame_reports() {
 // input_tokens / output_tokens，不是 chat completions 的 prompt_tokens / completion_tokens
 #[test]
 fn openai_responses_non_stream_usage_from_input_output_tokens() {
-    let rewriter = ResponseRewriter::new(get_adapter("openai").unwrap(), "deepseek-flash");
+    let rewriter = ResponseRewriter::new(get_adapter("openai_chat").unwrap(), "deepseek-flash");
     let body = Bytes::from(
         serde_json::to_vec(&json!({
             "object": "response",
@@ -306,7 +361,7 @@ fn openai_responses_non_stream_usage_from_input_output_tokens() {
 // 流式 responses 的最后一条事件是 response.completed，usage 挂在 response 对象里
 #[test]
 fn openai_responses_stream_usage_from_completed_event() {
-    let rewriter = ResponseRewriter::new(get_adapter("openai").unwrap(), "deepseek-flash");
+    let rewriter = ResponseRewriter::new(get_adapter("openai_chat").unwrap(), "deepseek-flash");
     rewriter.rewrite_sse_event(
         b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
     );
@@ -325,7 +380,7 @@ fn openai_responses_stream_usage_from_completed_event() {
 // 那不是「0」而是「还没到」，不能因此记一笔 0
 #[test]
 fn openai_responses_usage_reads_incomplete_event_and_ignores_null_usage() {
-    let rewriter = ResponseRewriter::new(get_adapter("openai").unwrap(), "deepseek-flash");
+    let rewriter = ResponseRewriter::new(get_adapter("openai_chat").unwrap(), "deepseek-flash");
     rewriter.rewrite_sse_event(
         b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"deepseek-flash\",\"status\":\"in_progress\",\"usage\":null}}\n\n",
     );

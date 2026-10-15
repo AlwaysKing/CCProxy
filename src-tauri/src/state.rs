@@ -145,7 +145,8 @@ impl AppState {
     // codex 模型清单的期望条目：OpenAI 协议下启用的映射 → 名字用 clientModel、
     // 能力取映射指向的真实模型。检查与应用共用这一份，两边口径才不会漂
     pub fn codex_catalog(&self, config: &AppConfig) -> Vec<crate::clients::catalog::ExpectedEntry> {
-        expected_catalog_entries(config.protocol("openai"))
+        // codex 只会发 Responses 协议，所以清单取自 openai_responses 这条（协议拆分前是 openai）
+        expected_catalog_entries(config.protocol("openai_responses"), &config.providers)
     }
 
     // 协议配置变了（模型能力、映射、供应商启停）就把已归我们管的 codex 目录的清单刷一遍，

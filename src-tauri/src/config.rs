@@ -8,12 +8,34 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-// 版本号只标记写出的配置形态，加载时不比对：新版读旧配置是兼容的（模型条目两种写法都认），
-// 但旧版读新配置不兼容（对象条目会被旧的字符串过滤静默滤掉），所以不承诺降级回滚
-pub const CONFIG_VERSION: u32 = 1;
+// 版本号只标记写出的配置形态，加载时不比对：新版读旧配置是兼容的（老结构走迁移，
+// 模型条目两种写法都认），但旧版读新配置不兼容（供应商从协议下提到了顶层），所以不承诺降级回滚。
+// v2 的变化：协议由两条拆成三条（openai → openai_chat + openai_responses），
+// 供应商从 protocols[].providers 提到顶层 providers 并带 apiFormat
+pub const CONFIG_VERSION: u32 = 2;
 pub const DEFAULT_PORT: u16 = 18888;
-// v1 只支持这两个协议：识别器与适配器都按这个集合工作，配置里出现别的协议没有意义
-pub const SUPPORTED_PROTOCOLS: [(&str, &str); 2] = [("anthropic", "Anthropic"), ("openai", "OpenAI")];
+// 客户端线格式三条线。协议只决定「客户端发来的模型名按哪张映射表查」；
+// 上游说什么格式由供应商的 apiFormat 决定（见 API_FORMATS），两者不同时代理做转换
+pub const SUPPORTED_PROTOCOLS: [(&str, &str); 3] = [
+    ("anthropic", "Anthropic"),
+    ("openai_chat", "OpenAI Chat"),
+    ("openai_responses", "OpenAI Responses"),
+];
+// 供应商的上游线格式。auto = 跟随客户端（格式与路径都不动，等于不做转换）；
+// 其余三种表示「这个上游说这种格式」，与客户端格式不同时由转换层转换
+pub const API_FORMATS: [&str; 4] = ["auto", "anthropic", "openai_chat", "openai_responses"];
+pub const DEFAULT_API_FORMAT: &str = "auto";
+pub fn api_format_label(id: &str) -> &str {
+    match id {
+        "anthropic" => "Anthropic",
+        "openai_chat" => "OpenAI Chat",
+        "openai_responses" => "OpenAI Responses",
+        _ => "跟随客户端",
+    }
+}
+// 老配置里 OpenAI 是一条协议，现在拆成 chat / responses 两条。迁移时把老条目下的映射
+// 复制到这两条上：旧行为下两条路径都能走通，复制是唯一无损的迁移方式
+const LEGACY_PROTOCOL_ID: &str = "openai";
 // 手动添加的客户端配置目录允许的类型；内置扫描位置不进配置
 pub const CLIENT_DIR_KINDS: [&str; 2] = ["claude", "codex"];
 // 输入模态白名单：以 codex models.json 的 input_modalities 为准，界面也只给这两项勾
@@ -60,6 +82,8 @@ pub struct Provider {
     pub enabled: bool,
     pub base_url: String,
     pub token: String,
+    // 上游线格式：auto | anthropic | openai_chat | openai_responses
+    pub api_format: String,
     pub models: Vec<Model>,
 }
 
@@ -79,7 +103,6 @@ pub struct Protocol {
     pub id: String,
     pub name: String,
     pub enabled: bool,
-    pub providers: Vec<Provider>,
     pub mappings: Vec<Mapping>,
 }
 
@@ -88,6 +111,9 @@ pub struct Protocol {
 pub struct AppConfig {
     pub version: u32,
     pub settings: Settings,
+    // 全局供应商池：三个协议共用。供应商是「一个上游端点 + 一种格式」，与客户端协议无关；
+    // 挂在协议下面会让同一家上游在每个协议里各录一遍
+    pub providers: Vec<Provider>,
     pub protocols: Vec<Protocol>,
 }
 
@@ -114,10 +140,10 @@ pub fn create_default_config() -> AppConfig {
                 id: (*id).to_string(),
                 name: (*name).to_string(),
                 enabled: true,
-                providers: Vec::new(),
                 mappings: Vec::new(),
             })
             .collect(),
+        providers: Vec::new(),
     }
 }
 
@@ -172,7 +198,7 @@ fn json_text(value: &Value) -> String {
 // 模型条目：名称必填；上下文窗口与模态/推理能力只有 OpenAI 协议的界面会填，
 // 这里不按协议区分——填了且合法就留，非法只丢该字段并记 issue，不连整个模型一起丢。
 // 兼容旧格式：字符串条目直接当模型名（老配置里存的就是这种）
-fn normalize_model(raw: &Value, protocol_id: &str, provider_id: &str, issues: &mut Vec<String>) -> Option<Model> {
+fn normalize_model(raw: &Value, provider_id: &str, issues: &mut Vec<String>) -> Option<Model> {
     if let Some(text) = as_str(raw) {
         let name = text.trim();
         return if name.is_empty() {
@@ -188,12 +214,12 @@ fn normalize_model(raw: &Value, protocol_id: &str, provider_id: &str, issues: &m
         };
     }
     if !is_plain_object(raw) {
-        issues.push(format!("协议 {protocol_id} 的供应商 {provider_id} 下存在非法模型条目，已丢弃"));
+        issues.push(format!("供应商 {provider_id} 下存在非法模型条目，已丢弃"));
         return None;
     }
     let name = raw.get("name").and_then(as_str).map(str::trim).unwrap_or("");
     if name.is_empty() {
-        issues.push(format!("协议 {protocol_id} 的供应商 {provider_id} 下有模型缺少 name，已丢弃"));
+        issues.push(format!("供应商 {provider_id} 下有模型缺少 name，已丢弃"));
         return None;
     }
 
@@ -267,35 +293,48 @@ fn normalize_model(raw: &Value, protocol_id: &str, provider_id: &str, issues: &m
     Some(model)
 }
 
-fn normalize_provider(raw: &Value, protocol_id: &str, issues: &mut Vec<String>) -> Option<Provider> {
+// 供应商是全局的（不再属于某个协议）。fallback_format 用于两种情形：
+// 顶层 providers 里没写 apiFormat 时用 auto；从老配置的协议下提升上来时按归属协议推断。
+fn normalize_provider(raw: &Value, fallback_format: &str, issues: &mut Vec<String>) -> Option<Provider> {
     if !is_plain_object(raw) {
-        issues.push(format!("协议 {protocol_id} 下存在非法供应商条目，已丢弃"));
+        issues.push("存在非法供应商条目，已丢弃".to_string());
         return None;
     }
     let id = raw.get("id").and_then(as_str).unwrap_or("");
     if id.is_empty() {
-        issues.push(format!("协议 {protocol_id} 下有供应商缺少 id，已丢弃"));
+        issues.push("有供应商缺少 id，已丢弃".to_string());
         return None;
     }
     let base_url = raw.get("baseUrl").and_then(as_str).map(str::trim).unwrap_or("");
     if base_url.is_empty() {
-        issues.push(format!("协议 {protocol_id} 的供应商 {id} 缺少 baseUrl，已丢弃"));
+        issues.push(format!("供应商 {id} 缺少 baseUrl，已丢弃"));
         return None;
     }
 
     let mut models: Vec<Model> = Vec::new();
     if let Some(items) = raw.get("models").and_then(Value::as_array) {
         for item in items {
-            let Some(model) = normalize_model(item, protocol_id, id, issues) else {
+            let Some(model) = normalize_model(item, id, issues) else {
                 continue;
             };
             if models.iter().any(|kept| kept.name == model.name) {
-                issues.push(format!("协议 {protocol_id} 的供应商 {id} 存在重复模型 {}，已丢弃后者", model.name));
+                issues.push(format!("供应商 {id} 存在重复模型 {}，已丢弃后者", model.name));
                 continue;
             }
             models.push(model);
         }
     }
+
+    // 认不出的格式退回 fallback，不丢整个供应商：格式填错不该让上游地址与 token 一起消失
+    let declared = raw.get("apiFormat").and_then(as_str).map(str::trim).unwrap_or("");
+    let api_format = if declared.is_empty() {
+        fallback_format.to_string()
+    } else if API_FORMATS.contains(&declared) {
+        declared.to_string()
+    } else {
+        issues.push(format!("供应商 {id} 的 apiFormat 非法（{declared}），已按 {fallback_format} 处理"));
+        fallback_format.to_string()
+    };
 
     let name = raw.get("name").and_then(as_str).map(str::trim).filter(|text| !text.is_empty()).unwrap_or(id);
     Some(Provider {
@@ -304,6 +343,7 @@ fn normalize_provider(raw: &Value, protocol_id: &str, issues: &mut Vec<String>) 
         enabled: raw.get("enabled").and_then(Value::as_bool) != Some(false),
         base_url: base_url.to_string(),
         token: raw.get("token").and_then(as_str).unwrap_or("").to_string(),
+        api_format,
         models,
     })
 }
@@ -346,12 +386,18 @@ fn normalize_mapping(
     })
 }
 
-fn build_protocol(raw: Option<&Value>, preset_id: &str, preset_name: &str, issues: &mut Vec<String>) -> Protocol {
+// 协议只留映射表：供应商已提到顶层，这里只校验映射指向的供应商是否存在（provider_ids 来自全局池）
+fn build_protocol(
+    raw: Option<&Value>,
+    preset_id: &str,
+    preset_name: &str,
+    provider_ids: &[String],
+    issues: &mut Vec<String>,
+) -> Protocol {
     let mut protocol = Protocol {
         id: preset_id.to_string(),
         name: preset_name.to_string(),
         enabled: true,
-        providers: Vec::new(),
         mappings: Vec::new(),
     };
     let Some(raw) = raw.filter(|value| is_plain_object(value)) else {
@@ -359,29 +405,14 @@ fn build_protocol(raw: Option<&Value>, preset_id: &str, preset_name: &str, issue
         return protocol;
     };
     protocol.enabled = raw.get("enabled").and_then(Value::as_bool) != Some(false);
-    if let Some(name) = raw.get("name").and_then(as_str).map(str::trim).filter(|text| !text.is_empty()) {
-        protocol.name = name.to_string();
-    }
-
-    let mut provider_ids: Vec<String> = Vec::new();
-    if let Some(items) = raw.get("providers").and_then(Value::as_array) {
-        for item in items {
-            let Some(provider) = normalize_provider(item, preset_id, issues) else {
-                continue;
-            };
-            if provider_ids.iter().any(|kept| *kept == provider.id) {
-                issues.push(format!("协议 {preset_id} 存在重复的供应商 id {}，已丢弃后者", provider.id));
-                continue;
-            }
-            provider_ids.push(provider.id.clone());
-            protocol.providers.push(provider);
-        }
-    }
+    // 名字不读配置：协议是固定的三条预设，名字是预设的一部分（界面上也没有改名的地方）。
+    // 读配置会出事——老配置里那条 openai 的 name 是 "OpenAI"，拆成 Chat 与 Responses 两条后
+    // 两边都继承它，Tab 上就变成两个一模一样的「OpenAI」，分不出在配哪条
 
     let mut mapping_ids: Vec<String> = Vec::new();
     if let Some(items) = raw.get("mappings").and_then(Value::as_array) {
         for item in items {
-            let Some(mapping) = normalize_mapping(item, preset_id, &provider_ids, issues) else {
+            let Some(mapping) = normalize_mapping(item, preset_id, provider_ids, issues) else {
                 continue;
             };
             if mapping_ids.iter().any(|kept| *kept == mapping.id) {
@@ -462,6 +493,54 @@ fn to_number(value: &Value) -> Option<f64> {
     }
 }
 
+// 两份供应商定义是否等价：等价就直接复用，不等价就拆成两个。
+// 上游格式也算身份的一部分：把 anthropic 格式的供应商合给 openai 协议的映射用，等于把那
+// 条流量从「直通」悄悄改成「转换」，这种静默的行为变化比多一行重复供应商更难查
+fn same_provider(left: &Provider, right: &Provider) -> bool {
+    left.base_url == right.base_url && left.token == right.token && left.api_format == right.api_format
+}
+
+// 给重名的供应商取一个没被占用的 id：p_ab12 → p_ab12_2
+fn unique_provider_id(base: &str, taken: &[String]) -> String {
+    let mut index = 2usize;
+    loop {
+        let candidate = format!("{base}_{index}");
+        if !taken.iter().any(|kept| *kept == candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+// 把某个协议条目里的映射改指到改名后的供应商（老结构迁移专用）
+fn rewrite_mapping_providers(protocol: &mut Value, renamed: &[(String, String)]) {
+    let Some(mappings) = protocol.get_mut("mappings").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for mapping in mappings.iter_mut() {
+        let Some(object) = mapping.as_object_mut() else {
+            continue;
+        };
+        let Some(current) = object.get("providerId").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some((_, next)) = renamed.iter().find(|(old, _)| old == current) {
+            object.insert("providerId".to_string(), Value::String(next.clone()));
+        }
+    }
+}
+
+// 配置是不是老结构：协议下挂着 providers，或者还留着拆分前的 openai 协议条目
+fn has_legacy_shape(raw: &Value) -> bool {
+    let Some(protocols) = raw.get("protocols").and_then(Value::as_array) else {
+        return false;
+    };
+    protocols.iter().any(|item| {
+        is_plain_object(item)
+            && (item.get("id").and_then(as_str) == Some(LEGACY_PROTOCOL_ID) || item.get("providers").is_some())
+    })
+}
+
 pub struct Validated {
     pub ok: bool,
     pub config: Option<AppConfig>,
@@ -497,7 +576,125 @@ pub fn validate_config(raw: &Value) -> Validated {
     if raw_protocols.is_none() {
         issues.push("protocols 不是数组，已重置为默认协议".to_string());
     }
-    let raw_protocols = raw_protocols.unwrap_or_default();
+    // 迁移时要就地改老结构里的映射指向（见下面的重名处理），所以这里拿可变的副本
+    let mut raw_protocols = raw_protocols.unwrap_or_default();
+
+    // 供应商池：先读新形态（顶层 providers），再把老形态（挂在协议下面）提升上来。
+    // 提升时按归属协议推断上游格式：anthropic 协议的供应商说的就是 Anthropic 格式；
+    // 老的 openai 协议那条历史上有 /v1/chat/completions 与 /v1/responses 两条路径都直通，
+    // 说不准是哪种格式，取 auto（跟随客户端）——迁移后行为与迁移前完全一致
+    let mut providers: Vec<Provider> = Vec::new();
+    let mut provider_ids: Vec<String> = Vec::new();
+    if let Some(items) = raw.get("providers").and_then(Value::as_array) {
+        for item in items {
+            let Some(provider) = normalize_provider(item, DEFAULT_API_FORMAT, &mut issues) else {
+                continue;
+            };
+            if provider_ids.iter().any(|kept| *kept == provider.id) {
+                issues.push(format!("存在重复的供应商 id {}，已丢弃后者", provider.id));
+                continue;
+            }
+            provider_ids.push(provider.id.clone());
+            providers.push(provider);
+        }
+    }
+    let mut hoisted_count = 0usize;
+    // 只有顶层池为空时才从协议下提升：两种形态同时存在说明文件被手工改过（或者只写了一半），
+    // 这时以顶层为准，不能把协议下那份老数据再提升一遍——那会把已经删掉的供应商救回来
+    let nested_present = raw_protocols
+        .iter()
+        .any(|item| is_plain_object(item) && item.get("providers").is_some());
+    let hoist_legacy = providers.is_empty();
+    if !hoist_legacy && nested_present {
+        issues.push("配置里同时有顶层 providers 与协议下的 providers：以顶层为准，协议下的那份已忽略".to_string());
+    }
+    for item in raw_protocols.iter_mut() {
+        if !hoist_legacy {
+            continue;
+        }
+        if !is_plain_object(item) {
+            continue;
+        }
+        let Some(entries) = item.get("providers").and_then(Value::as_array).cloned() else {
+            continue;
+        };
+        let owner = item.get("id").and_then(as_str).unwrap_or("");
+        let fallback = match owner {
+            "anthropic" => "anthropic",
+            "openai_chat" => "openai_chat",
+            "openai_responses" => "openai_responses",
+            _ => DEFAULT_API_FORMAT,
+        };
+        // 老结构里供应商 id 只在协议内唯一，两个协议下可以各有一份同名但指向不同上游的条目
+        // （手改配置会这样）。提升到全局池时这种重名要改名保留：直接丢掉会让映射悄悄指到
+        // 另一家上游上去。改名之后，该协议内的映射一并改指过去
+        let mut renamed: Vec<(String, String)> = Vec::new();
+        for entry in &entries {
+            let Some(mut provider) = normalize_provider(entry, fallback, &mut issues) else {
+                continue;
+            };
+            if let Some(existing) = providers.iter().find(|kept| kept.id == provider.id) {
+                if same_provider(existing, &provider) {
+                    continue;
+                }
+                let next_id = unique_provider_id(&provider.id, &provider_ids);
+                issues.push(format!(
+                    "供应商 {} 在老配置的多个协议下定义不一致（上游地址、token 或上游格式不同），已拆成 {}，各协议内的映射按原指向改指",
+                    provider.id, next_id
+                ));
+                renamed.push((provider.id.clone(), next_id.clone()));
+                provider.id = next_id;
+            }
+            provider_ids.push(provider.id.clone());
+            providers.push(provider);
+            hoisted_count += 1;
+        }
+        if !renamed.is_empty() {
+            rewrite_mapping_providers(item, &renamed);
+        }
+    }
+    if hoisted_count > 0 {
+        issues.push(format!(
+            "供应商已升为全局（三个协议共用），从老配置提升了 {hoisted_count} 个；上游格式按归属协议推断，可在供应商弹窗里改"
+        ));
+    }
+
+    let mut migrated_legacy = false;
+    let protocols: Vec<Protocol> = SUPPORTED_PROTOCOLS
+        .iter()
+        .map(|(id, name)| {
+            let mut matched = raw_protocols
+                .iter()
+                .find(|item| is_plain_object(item) && item.get("id").and_then(as_str) == Some(*id));
+            // 老配置里 OpenAI 只有一条：拆出来的 chat 与 responses 两条都从它复制
+            if matched.is_none()
+                && (*id == "openai_chat" || *id == "openai_responses")
+            {
+                matched = raw_protocols.iter().find(|item| {
+                    is_plain_object(item) && item.get("id").and_then(as_str) == Some(LEGACY_PROTOCOL_ID)
+                });
+                if matched.is_some() {
+                    migrated_legacy = true;
+                }
+            }
+            build_protocol(matched, id, name, &provider_ids, &mut issues)
+        })
+        .collect();
+    if migrated_legacy {
+        issues.push("OpenAI 协议已拆成 OpenAI Chat 与 OpenAI Responses 两条，原映射表已各复制一份".to_string());
+    }
+
+    // 老的 openai 条目与拆分后的条目同时存在时，以拆分后的为准。这不算配置错误，
+    // 但要说一声，免得用户以为老条目里的映射还在生效
+    let has_split_entry = raw_protocols.iter().any(|item| {
+        is_plain_object(item) && matches!(item.get("id").and_then(as_str), Some("openai_chat") | Some("openai_responses"))
+    });
+    let has_legacy_entry = raw_protocols
+        .iter()
+        .any(|item| is_plain_object(item) && item.get("id").and_then(as_str) == Some(LEGACY_PROTOCOL_ID));
+    if has_split_entry && has_legacy_entry {
+        issues.push("配置里同时有老的 openai 协议条目与拆分后的条目：以拆分后的为准，老条目及其映射已被忽略".to_string());
+    }
 
     let config = AppConfig {
         version: CONFIG_VERSION,
@@ -510,15 +707,8 @@ pub fn validate_config(raw: &Value) -> Validated {
             client_dirs: normalize_client_dirs(settings.get("clientDirs"), &mut issues),
             client_token: settings.get("clientToken").and_then(as_str).unwrap_or("").trim().to_string(),
         },
-        protocols: SUPPORTED_PROTOCOLS
-            .iter()
-            .map(|(id, name)| {
-                let matched = raw_protocols
-                    .iter()
-                    .find(|item| is_plain_object(item) && item.get("id").and_then(as_str) == Some(*id));
-                build_protocol(matched, id, name, &mut issues)
-            })
-            .collect(),
+        providers,
+        protocols,
     };
 
     for item in &raw_protocols {
@@ -527,7 +717,14 @@ pub fn validate_config(raw: &Value) -> Validated {
         } else {
             item.clone()
         };
-        let known = id.as_str().map(|text| SUPPORTED_PROTOCOLS.iter().any(|(id, _)| *id == text)).unwrap_or(false);
+        let known = id
+            .as_str()
+            .map(|text| {
+                // 老的 openai 条目不算「不支持」：它的映射已经复制到拆出来的两条协议上
+                text == LEGACY_PROTOCOL_ID
+                    || SUPPORTED_PROTOCOLS.iter().any(|(id, _)| *id == text)
+            })
+            .unwrap_or(false);
         if !known {
             let label = if id.is_null() && is_plain_object(item) {
                 "undefined".to_string()
@@ -585,6 +782,30 @@ impl ConfigManager {
         Some(backup_path.to_string_lossy().to_string())
     }
 
+    // 老结构的配置会升级成新结构：供应商提升到顶层、OpenAI 协议拆成两条、供应商补上上游格式。
+    // 升级前先把原文件复制一份——万一新版读出来不对，用户手上还有一份旧结构可以照着改回去。
+    // 复制成功再把新结构落盘，免得每次启动都重跑一遍迁移。
+    // 备份或写回失败都只记 issue，不打断这次启动：内存里已经是升级后的结构了
+    fn upgrade_legacy_config(&self, raw: &Value, config: &AppConfig, issues: &mut Vec<String>) {
+        if !has_legacy_shape(raw) {
+            return;
+        }
+        let backup = self.base_dir.join("app.json.v1.bak");
+        let backup_note = match fs::copy(&self.config_path, &backup) {
+            Ok(_) => format!("原文件已备份为 {}", backup.to_string_lossy()),
+            Err(error) => format!("复制原文件失败：{error}"),
+        };
+        let encoded = serde_json::to_value(config).unwrap_or(Value::Null);
+        let note = "已把旧版配置升级为新结构（供应商提升为全局、OpenAI 协议拆成 Chat 与 Responses 两条）";
+        match self.save(&encoded) {
+            Ok((_, save_issues)) => {
+                issues.push(format!("{note}。{backup_note}"));
+                issues.extend(save_issues);
+            }
+            Err(error) => issues.push(format!("{note}，但写回失败（{error}），本次仍按升级后的结构运行。{backup_note}")),
+        }
+    }
+
     pub fn load(&self) -> LoadResult {
         let text = match fs::read_to_string(&self.config_path) {
             Ok(text) => text,
@@ -623,7 +844,12 @@ impl ConfigManager {
             }
         };
 
-        let result = validate_config(&raw);
+        let mut result = validate_config(&raw);
+        if result.ok {
+            if let Some(config) = result.config.as_ref() {
+                self.upgrade_legacy_config(&raw, config, &mut result.issues);
+            }
+        }
         match result.config {
             Some(config) if result.ok => LoadResult {
                 config,

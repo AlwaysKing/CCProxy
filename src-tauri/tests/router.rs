@@ -24,7 +24,7 @@ fn base(overrides: impl FnOnce(&mut Value)) -> ccproxy_lib::config::AppConfig {
                     { "id": "fallback", "enabled": true, "clientModel": "*", "providerId": "p1", "realModel": "f1" }
                 ]
             },
-            { "id": "openai", "name": "OpenAI", "enabled": false, "providers": [], "mappings": [] }
+            { "id": "openai_chat", "name": "OpenAI Chat", "enabled": false, "providers": [], "mappings": [] }
         ]
     });
     overrides(&mut value);
@@ -41,6 +41,18 @@ fn exact_beats_wildcard_and_fallback() {
     assert_eq!(route.mapping.id, "exact");
     assert_eq!(route.real_model, "m1");
     assert_eq!(route.provider_id, "p1");
+    // 这条供应商是从老配置的 anthropic 协议下提升上来的，格式按归属协议推断成 anthropic
+    assert_eq!(route.api_format, "anthropic");
+}
+
+#[test]
+fn provider_api_format_reaches_the_route() {
+    // 上游格式是转换方向的依据，必须原样带到路由结果里
+    let config = base(|value| {
+        value["protocols"][0]["providers"][0]["apiFormat"] = json!("openai_responses");
+    });
+    let route = resolve_routing(&config, "anthropic", "claude-sonnet-4").unwrap();
+    assert_eq!(route.api_format, "openai_responses");
 }
 
 #[test]
@@ -97,7 +109,7 @@ fn unmatched_without_fallback_is_404_with_model_and_protocol_name() {
 
 #[test]
 fn disabled_protocol_is_503() {
-    let error = resolve_routing(&plain(), "openai", "gpt-4o").unwrap_err();
+    let error = resolve_routing(&plain(), "openai_chat", "gpt-4o").unwrap_err();
     assert_eq!(error.status, 503);
 }
 

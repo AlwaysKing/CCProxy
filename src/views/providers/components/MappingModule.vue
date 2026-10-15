@@ -20,8 +20,8 @@ const editingMapping = ref(null)
 const deletingMapping = ref(null)
 const notice = ref('')
 
-// 没有供应商时映射没有目标可指，先挡在入口
-const canAdd = computed(() => props.protocol.providers.length > 0)
+// 没有供应商时映射没有目标可指，先挡在入口。供应商是全局池，所有协议共用同一份
+const canAdd = computed(() => configStore.providers.length > 0)
 
 // 规则形态要一眼能分辨：表格里全是模型名，通配和兜底光看字符串容易漏。
 // 兜底用主色（橙）：蓝色是这套配色里唯一的冷色，挂在表里跟整页不合，且 info 语义偏「提示」，
@@ -38,7 +38,7 @@ const rows = computed(() =>
 )
 
 function providerName(providerId) {
-  return props.protocol.providers.find((item) => item.id === providerId)?.name || '（供应商已删除）'
+  return configStore.providers.find((item) => item.id === providerId)?.name || '（供应商已删除）'
 }
 
 function onAdd() {

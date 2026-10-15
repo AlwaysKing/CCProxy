@@ -1,4 +1,5 @@
-// 协议识别器单测：只看路径的判定，含前缀边界与「头/体特征不再影响结论」
+// 协议识别器单测：只看路径的判定，含前缀边界与「头/体特征不再影响结论」。
+// 客户端线格式三条线：anthropic / openai_chat / openai_responses
 
 use ccproxy_lib::proxy::detector::{detect_protocol, unknown_path_message};
 
@@ -12,14 +13,24 @@ fn anthropic_paths() {
 }
 
 #[test]
-fn openai_paths() {
-    assert_eq!(detect_protocol("/v1/chat/completions"), Some("openai"));
-    assert_eq!(detect_protocol("/v1/responses"), Some("openai"));
-    assert_eq!(detect_protocol("/v1/completions"), Some("openai"));
-    assert_eq!(detect_protocol("/v1/embeddings"), Some("openai"));
-    assert_eq!(detect_protocol("/v1/models"), Some("openai"));
-    assert_eq!(detect_protocol("/v1/models/claude-sonnet-4-20250514"), Some("openai"));
-    assert_eq!(detect_protocol("/v1/responses?stream=true"), Some("openai"));
+fn openai_chat_paths() {
+    assert_eq!(detect_protocol("/v1/chat/completions"), Some("openai_chat"));
+    // 老的 completions / embeddings 与 chat completions 同族
+    assert_eq!(detect_protocol("/v1/completions"), Some("openai_chat"));
+    assert_eq!(detect_protocol("/v1/embeddings"), Some("openai_chat"));
+}
+
+#[test]
+fn openai_responses_paths() {
+    assert_eq!(detect_protocol("/v1/responses"), Some("openai_responses"));
+    assert_eq!(detect_protocol("/v1/responses?stream=true"), Some("openai_responses"));
+}
+
+#[test]
+fn models_paths_are_not_a_protocol() {
+    // /v1/models 由代理自己接管（models.rs），不参与协议判定；它的子路径也不转发上游
+    assert_eq!(detect_protocol("/v1/models"), None);
+    assert_eq!(detect_protocol("/v1/models/claude-sonnet-4-20250514"), None);
 }
 
 #[test]

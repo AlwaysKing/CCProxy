@@ -15,6 +15,8 @@ export const useConfigStore = defineStore('config', () => {
   const error = ref(null)
 
   const protocols = computed(() => config.value?.protocols ?? [])
+  // 供应商是全局池，三个协议共用；协议只持有映射表
+  const providers = computed(() => config.value?.providers ?? [])
 
   function findProtocol(draft, protocolId) {
     return draft.protocols.find((item) => item.id === protocolId)
@@ -84,9 +86,9 @@ export const useConfigStore = defineStore('config', () => {
     })
   }
 
-  function toggleProvider(protocolId, providerId) {
+  function toggleProvider(providerId) {
     return mutate((draft) => {
-      const provider = findProtocol(draft, protocolId)?.providers.find((item) => item.id === providerId)
+      const provider = (draft.providers ?? []).find((item) => item.id === providerId)
       if (provider) provider.enabled = !provider.enabled
     })
   }
@@ -98,24 +100,35 @@ export const useConfigStore = defineStore('config', () => {
     })
   }
 
-  function upsertProvider(protocolId, provider) {
+  function upsertProvider(provider) {
     return mutate((draft) => {
-      const protocol = findProtocol(draft, protocolId)
-      if (!protocol) return
-      const index = protocol.providers.findIndex((item) => item.id === provider.id)
-      if (index >= 0) protocol.providers[index] = provider
-      else protocol.providers.push(provider)
+      if (!Array.isArray(draft.providers)) draft.providers = []
+      const index = draft.providers.findIndex((item) => item.id === provider.id)
+      if (index >= 0) draft.providers[index] = provider
+      else draft.providers.push(provider)
     })
   }
 
-  // 删供应商要连带删掉指向它的映射，不留悬空引用
-  function removeProvider(protocolId, providerId) {
+  // 删供应商要连带删掉指向它的映射，不留悬空引用。供应商是全局的，
+  // 所以三个协议的映射表都要清一遍
+  function removeProvider(providerId) {
     return mutate((draft) => {
-      const protocol = findProtocol(draft, protocolId)
-      if (!protocol) return
-      protocol.providers = protocol.providers.filter((item) => item.id !== providerId)
-      protocol.mappings = protocol.mappings.filter((item) => item.providerId !== providerId)
+      draft.providers = (draft.providers ?? []).filter((item) => item.id !== providerId)
+      for (const protocol of draft.protocols ?? []) {
+        protocol.mappings = (protocol.mappings ?? []).filter((mapping) => mapping.providerId !== providerId)
+      }
     })
+  }
+
+  // 某个供应商被哪些协议的映射引用：删它之前要说清影响范围
+  function mappingsUsingProvider(providerId) {
+    const hits = []
+    for (const protocol of protocols.value) {
+      for (const mapping of protocol.mappings ?? []) {
+        if (mapping.providerId === providerId) hits.push({ protocolId: protocol.id, protocolName: protocol.name, mapping })
+      }
+    }
+    return hits
   }
 
   function upsertMapping(protocolId, mapping) {
@@ -154,6 +167,7 @@ export const useConfigStore = defineStore('config', () => {
     error,
     // Computed
     protocols,
+    providers,
     // Actions
     init,
     applyState,
@@ -166,6 +180,7 @@ export const useConfigStore = defineStore('config', () => {
     removeProvider,
     upsertMapping,
     removeMapping,
+    mappingsUsingProvider,
     updateSetting
   }
 })

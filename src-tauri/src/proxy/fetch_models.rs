@@ -1,4 +1,4 @@
-// 供应商模型拉取：按协议的认证方式请求上游 GET /v1/models，解析出模型 id 列表。
+// 供应商模型拉取：按供应商声明的上游格式注入认证，请求上游 GET /v1/models，解析出模型 id 列表。
 // 供供应商编辑弹窗「拉取」按钮使用；走 Rust 侧请求，绕开渲染层的 CORS 限制。
 // 与转发同一契约风格：绝不抛错，成败都返回 { ok, ... }。
 
@@ -13,11 +13,14 @@ use crate::proxy::upstream::build_upstream_url;
 
 const FETCH_TIMEOUT_MS: u64 = 10 * 1000;
 
-// 拉取上游模型列表。入参 { protocolId, baseUrl, token }
+// 拉取上游模型列表。入参 { apiFormat, baseUrl, token }
+// apiFormat 是供应商声明的上游格式；auto（跟随客户端）在拉取时没有客户端可跟，
+// 按 OpenAI 一族的 Bearer 发——OpenAI 兼容网关是最常见的一类
 pub async fn fetch_upstream_models(client: &reqwest::Client, payload: &Value) -> Value {
-    let protocol_id = payload.get("protocolId").and_then(Value::as_str).unwrap_or("");
+    let api_format = payload.get("apiFormat").and_then(Value::as_str).unwrap_or("");
     let base_url = payload.get("baseUrl").and_then(Value::as_str).unwrap_or("");
     let token = payload.get("token").and_then(Value::as_str).unwrap_or("");
+    let protocol_id = if api_format == "anthropic" { "anthropic" } else { "openai_chat" };
 
     let mut headers = HeaderMap::new();
     headers.insert("accept", axum::http::HeaderValue::from_static("application/json"));

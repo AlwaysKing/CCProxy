@@ -31,11 +31,12 @@ const form = ref({ clientModel: '', providerId: '', realModel: '' })
 const error = ref('')
 
 const isEdit = computed(() => !!props.mapping)
+// 供应商来自全局池：这份映射表之外的协议也能引用同一个供应商
 const providerOptions = computed(() =>
-  props.protocol.providers.map((provider) => ({ value: provider.id, label: provider.name }))
+  configStore.providers.map((provider) => ({ value: provider.id, label: provider.name }))
 )
 const selectedProvider = computed(
-  () => props.protocol.providers.find((provider) => provider.id === form.value.providerId) || null
+  () => configStore.providers.find((provider) => provider.id === form.value.providerId) || null
 )
 // 供应商的模型是配置条目，这里只关心名字——真实模型名进映射，属性留在供应商那边
 function modelNames(provider) {
@@ -60,7 +61,7 @@ watch(
     if (!visible) return
     error.value = ''
     // 新增时供应商和模型都默认选第一项：只有一个供应商的常见场景下能少点两次
-    const first = props.protocol.providers[0]
+    const first = configStore.providers[0]
     form.value = props.mapping
       ? {
           clientModel: props.mapping.clientModel,
@@ -77,7 +78,7 @@ watch(
   () => form.value.providerId,
   (id, prevId) => {
     if (!id || !prevId || id === prevId) return
-    const models = modelNames(props.protocol.providers.find((provider) => provider.id === id))
+    const models = modelNames(configStore.providers.find((provider) => provider.id === id))
     if (!models.includes(form.value.realModel)) form.value.realModel = models[0] ?? ''
   }
 )

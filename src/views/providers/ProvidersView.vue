@@ -25,7 +25,8 @@ const protocol = computed(() => configStore.protocols.find((item) => item.id ===
          报错显示在新协议上。两块必须各用自己的 key，同一组兄弟节点里 key 撞车会被 Vue 报警 -->
     <template v-if="protocol">
       <MappingModule :key="`mapping-${protocol.id}`" :protocol="protocol" />
-      <ProviderModule :key="`provider-${protocol.id}`" :protocol="protocol" />
+      <!-- 供应商是全局池，不随协议 Tab 切换，所以不带 key、也不传协议 -->
+      <ProviderModule />
     </template>
 
     <EmptyState

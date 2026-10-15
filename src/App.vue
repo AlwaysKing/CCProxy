@@ -84,7 +84,7 @@ onMounted(async () => {
 })
 
 // 协议配置（映射、模型能力）一变，目录检查的口径就过期了——codex 的模型清单
-// 对照的是 OpenAI 协议的映射。重扫一遍，顶栏徽标跟着更新
+// 对照的是 OpenAI Responses 协议的映射。重扫一遍，顶栏徽标跟着更新
 watch(() => configStore.protocols, () => { clientDirsStore.reload() }, { deep: true })
 
 onUnmounted(() => {

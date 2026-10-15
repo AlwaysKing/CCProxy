@@ -66,7 +66,7 @@ async fn fetch_models_parses_dedupes_and_injects_anthropic_auth() {
     let client = reqwest::Client::new();
     let result = fetch_upstream_models(
         &client,
-        &json!({ "protocolId": "anthropic", "baseUrl": format!("http://127.0.0.1:{port}"), "token": "sk-real" }),
+        &json!({ "apiFormat": "anthropic", "baseUrl": format!("http://127.0.0.1:{port}"), "token": "sk-real" }),
     )
     .await;
 
@@ -90,7 +90,7 @@ async fn fetch_models_uses_bearer_and_dedupes_version_segment() {
     let client = reqwest::Client::new();
     let result = fetch_upstream_models(
         &client,
-        &json!({ "protocolId": "openai", "baseUrl": format!("http://127.0.0.1:{port}/v1"), "token": "sk-real" }),
+        &json!({ "apiFormat": "openai_chat", "baseUrl": format!("http://127.0.0.1:{port}/v1"), "token": "sk-real" }),
     )
     .await;
     assert_eq!(result["models"], json!(["gpt-4o"]));
@@ -113,7 +113,7 @@ async fn fetch_models_reports_status_and_shape_errors() {
     let (port, stop) = mock(captured.clone(), 500, json!({ "error": "boom" })).await;
     let result = fetch_upstream_models(
         &client,
-        &json!({ "protocolId": "anthropic", "baseUrl": format!("http://127.0.0.1:{port}"), "token": "t" }),
+        &json!({ "apiFormat": "anthropic", "baseUrl": format!("http://127.0.0.1:{port}"), "token": "t" }),
     )
     .await;
     assert_eq!(result["ok"], json!(false));
@@ -124,7 +124,7 @@ async fn fetch_models_reports_status_and_shape_errors() {
     let (port, stop) = mock(captured.clone(), 200, json!({ "models": [] })).await;
     let result = fetch_upstream_models(
         &client,
-        &json!({ "protocolId": "anthropic", "baseUrl": format!("http://127.0.0.1:{port}"), "token": "t" }),
+        &json!({ "apiFormat": "anthropic", "baseUrl": format!("http://127.0.0.1:{port}"), "token": "t" }),
     )
     .await;
     assert_eq!(result["ok"], json!(false));
@@ -133,22 +133,18 @@ async fn fetch_models_reports_status_and_shape_errors() {
 }
 
 #[tokio::test]
-async fn fetch_models_rejects_unknown_protocol_and_unreachable_upstream() {
+async fn fetch_models_reports_unreachable_upstream_without_throwing() {
     let client = reqwest::Client::new();
 
-    let result = fetch_upstream_models(
-        &client,
-        &json!({ "protocolId": "gemini", "baseUrl": "http://127.0.0.1:1", "token": "t" }),
-    )
-    .await;
-    assert_eq!(result["ok"], json!(false));
-    assert!(result["error"].as_str().unwrap().contains("未知协议"));
-
-    let result = fetch_upstream_models(
-        &client,
-        &json!({ "protocolId": "anthropic", "baseUrl": "http://127.0.0.1:1", "token": "t" }),
-    )
-    .await;
-    assert_eq!(result["ok"], json!(false));
+    // auto 与认不出的格式都退回 OpenAI 一族的 Bearer；连不上时报错，不抛异常
+    for api_format in ["auto", "anthropic", "openai_responses", "gemini"] {
+        let result = fetch_upstream_models(
+            &client,
+            &json!({ "apiFormat": api_format, "baseUrl": "http://127.0.0.1:1", "token": "t" }),
+        )
+        .await;
+        assert_eq!(result["ok"], json!(false), "{api_format} 应该报失败");
+        assert!(result["error"].as_str().unwrap().contains("上游地址无效"), "{api_format}");
+    }
 }
 

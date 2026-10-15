@@ -8,7 +8,7 @@ use serde_json::{json, Map, Value};
 use crate::clients::json::{
     detect_indent_unit, finish, indent_at, plan_members_at, read_json_array, read_json_object, Edit, JsonEdit, JsonObject,
 };
-use crate::config::Protocol;
+use crate::config::{Provider, Protocol};
 
 pub const CATALOG_FILE: &str = "models.json";
 pub const CATALOG_KEY: &str = "model_catalog_json";
@@ -79,7 +79,8 @@ pub struct ExpectedEntry {
 
 // OpenAI 协议下「该出现在清单里」的条目：启用的映射（clientModel 不含 *——通配和兜底
 // 是路由规则不是模型），名字用 clientModel，能力取映射指向的那个真实模型的配置
-pub fn expected_catalog_entries(protocol: Option<&Protocol>) -> Vec<ExpectedEntry> {
+// providers 是配置顶层的全局供应商池：映射只存 providerId，供应商本体不再挂在协议下面
+pub fn expected_catalog_entries(protocol: Option<&Protocol>, providers: &[Provider]) -> Vec<ExpectedEntry> {
     // 协议整体停用时代理根本不服务它，清单一条都不归我们管
     let Some(protocol) = protocol else {
         return Vec::new();
@@ -101,7 +102,7 @@ pub fn expected_catalog_entries(protocol: Option<&Protocol>) -> Vec<ExpectedEntr
         if entries.iter().any(|entry| entry.name == mapping.client_model) {
             continue;
         }
-        let Some(provider) = protocol.providers.iter().find(|item| item.id == mapping.provider_id && item.enabled)
+        let Some(provider) = providers.iter().find(|item| item.id == mapping.provider_id && item.enabled)
         else {
             continue;
         };

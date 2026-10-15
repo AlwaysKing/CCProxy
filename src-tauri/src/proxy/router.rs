@@ -12,6 +12,8 @@ pub struct Route {
     pub provider_name: String,
     pub base_url: String,
     pub token: String,
+    // 供应商声明的上游线格式：auto | anthropic | openai_chat | openai_responses
+    pub api_format: String,
     pub mapping: Mapping,
     pub match_kind: String,
     pub real_model: String,
@@ -62,13 +64,14 @@ pub fn resolve_routing(config: &AppConfig, protocol_id: &str, client_model: &str
         });
     }
 
-    // 只保留可用条目：映射启用、供应商存在且启用
+    // 只保留可用条目：映射启用、供应商存在且启用。
+    // 供应商现在挂在配置顶层（三个协议共用），所以从 config.providers 里找而不是协议下
     let mut usable: Vec<(&Mapping, &crate::config::Provider)> = Vec::new();
     for mapping in &protocol.mappings {
         if !mapping.enabled {
             continue;
         }
-        let Some(provider) = protocol.providers.iter().find(|item| item.id == mapping.provider_id) else {
+        let Some(provider) = config.providers.iter().find(|item| item.id == mapping.provider_id) else {
             continue;
         };
         if !provider.enabled {
@@ -113,6 +116,7 @@ pub fn resolve_routing(config: &AppConfig, protocol_id: &str, client_model: &str
         provider_name: provider.name.clone(),
         base_url: provider.base_url.clone(),
         token: provider.token.clone(),
+        api_format: provider.api_format.clone(),
         mapping: (*mapping).clone(),
         match_kind: match_kind.unwrap_or("exact").to_string(),
         real_model: mapping.real_model.clone(),

@@ -93,7 +93,7 @@ fn expected_entries_use_client_model_name_and_real_model_capabilities() {
             ]
         }]
     }));
-    let entries = expected_catalog_entries(config.protocol("openai"));
+    let entries = expected_catalog_entries(config.protocol("openai_responses"), &config.providers);
     // 停用的映射、通配/兜底映射、停用供应商的映射都不算模型
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "client-a");
@@ -112,7 +112,7 @@ fn unconfigured_capabilities_stay_none() {
             "mappings": [{ "id": "m1", "clientModel": "client-a", "providerId": "p1", "realModel": "real-a", "enabled": true }]
         }]
     }));
-    let entries = expected_catalog_entries(config.protocol("openai"));
+    let entries = expected_catalog_entries(config.protocol("openai_responses"), &config.providers);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].context_window, None);
     assert_eq!(entries[0].max_context_window, None);
@@ -134,14 +134,14 @@ fn duplicate_mappings_keep_only_the_first_and_disabled_protocol_yields_nothing()
             ]
         }]
     }));
-    let entries = expected_catalog_entries(config.protocol("openai"));
+    let entries = expected_catalog_entries(config.protocol("openai_responses"), &config.providers);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].context_window, Some(111));
 
     let disabled = config_from(json!({
         "protocols": [{ "id": "openai", "name": "OpenAI", "enabled": false, "providers": [], "mappings": [] }]
     }));
-    assert!(expected_catalog_entries(disabled.protocol("openai")).is_empty());
+    assert!(expected_catalog_entries(disabled.protocol("openai_responses"), &disabled.providers).is_empty());
 }
 
 // ============================================================================ 检查

@@ -24,7 +24,13 @@ const DIMENSION_ITEMS = [
   { value: 'model', label: '按模型' }
 ]
 
-const PROTOCOL_LABELS = { anthropic: 'Anthropic', openai: 'OpenAI' }
+// openai 是拆分前的协议名，历史用量记录里还有，标签表一并保留
+const PROTOCOL_LABELS = {
+  anthropic: 'Anthropic',
+  openai_chat: 'OpenAI Chat',
+  openai_responses: 'OpenAI Responses',
+  openai: 'OpenAI'
+}
 
 const DIMENSION_LABELS = { day: '日期', provider: '供应商', model: '模型' }
 

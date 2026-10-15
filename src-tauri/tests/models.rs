@@ -69,14 +69,14 @@ fn resolve_client_protocol_prefers_anthropic_headers() {
 
     let mut map = HeaderMap::new();
     map.insert("authorization", "Bearer sk-fake".parse().unwrap());
-    assert_eq!(resolve_client_protocol(&map), "openai");
-    assert_eq!(resolve_client_protocol(&HeaderMap::new()), "openai");
+    assert_eq!(resolve_client_protocol(&map), "openai_chat");
+    assert_eq!(resolve_client_protocol(&HeaderMap::new()), "openai_chat");
 }
 
 #[test]
 fn usable_client_models_skips_disabled_and_wildcards() {
     let config = base(|_| {});
-    let names = usable_client_models(config.protocol("anthropic").unwrap());
+    let names = usable_client_models(config.protocol("anthropic").unwrap(), &config.providers);
     assert_eq!(names, vec!["claude-opus-4".to_string(), "claude-sonnet-4".to_string()]);
 }
 
@@ -105,7 +105,7 @@ fn openai_list_format() {
         value["protocols"][1]["mappings"] =
             json!([{ "id": "m-o1", "enabled": true, "clientModel": "gpt-4o", "providerId": "q1", "realModel": "deepseek-chat" }]);
     });
-    let (status, payload) = build_models_response(&config, "openai", None);
+    let (status, payload) = build_models_response(&config, "openai_chat", None);
     assert_eq!(status, 200);
     assert_eq!(payload["object"], json!("list"));
     let data = payload["data"].as_array().unwrap();
@@ -133,7 +133,7 @@ fn single_model_miss_returns_protocol_specific_404() {
     assert_eq!(payload["error"]["type"], json!("not_found_error"));
 
     let openai = base(|value| value["protocols"][1]["enabled"] = json!(true));
-    let (status, payload) = build_models_response(&openai, "openai", Some("no-such-model"));
+    let (status, payload) = build_models_response(&openai, "openai_chat", Some("no-such-model"));
     assert_eq!(status, 404);
     assert_eq!(payload["error"]["code"], json!("model_not_found"));
 }
@@ -141,7 +141,7 @@ fn single_model_miss_returns_protocol_specific_404() {
 #[test]
 fn disabled_and_missing_protocol() {
     let config = base(|_| {});
-    let (status, payload) = build_models_response(&config, "openai", None);
+    let (status, payload) = build_models_response(&config, "openai_chat", None);
     assert_eq!(status, 503);
     assert_eq!(payload["error"]["type"], json!("protocol_disabled"));
 

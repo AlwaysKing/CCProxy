@@ -18,7 +18,8 @@ let unsubscribe = null
 const PROTOCOL_ITEMS = [
   { value: 'all', label: '全部协议' },
   { value: 'anthropic', label: 'Anthropic' },
-  { value: 'openai', label: 'OpenAI' }
+  { value: 'openai_chat', label: 'OpenAI Chat' },
+  { value: 'openai_responses', label: 'OpenAI Responses' }
 ]
 
 const STATUS_ITEMS = [
@@ -28,7 +29,13 @@ const STATUS_ITEMS = [
   { value: 'cancelled', label: '已取消' }
 ]
 
-const PROTOCOL_LABELS = { anthropic: 'Anthropic', openai: 'OpenAI' }
+// 老日志里 openai 是一条协议，拆分前的记录还挂着这个值，所以标签表要留着它
+const PROTOCOL_LABELS = {
+  anthropic: 'Anthropic',
+  openai_chat: 'OpenAI Chat',
+  openai_responses: 'OpenAI Responses',
+  openai: 'OpenAI'
+}
 
 // 规则用词必须和映射模块一致（精确/通配/兜底）：两处说法不同，会让人以为是两回事
 const RULE_META = {

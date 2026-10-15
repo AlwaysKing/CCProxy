@@ -142,15 +142,42 @@ fn replace_model(scope: Option<&mut serde_json::Map<String, Value>>, client_mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     Anthropic,
-    Openai,
+    OpenAiChat,
+    OpenAiResponses,
 }
 
 impl Protocol {
     pub fn id(&self) -> &'static str {
         match self {
             Protocol::Anthropic => "anthropic",
-            Protocol::Openai => "openai",
+            Protocol::OpenAiChat => "openai_chat",
+            Protocol::OpenAiResponses => "openai_responses",
         }
+    }
+
+    // 上游端点：客户端路径与上游格式同族时原样带上（/v1/messages/count_tokens 这类子路径
+    // 要保住），不同族时换成目标格式的规范端点，查询串跟着走
+    pub fn upstream_path(&self, client_path: &str) -> String {
+        let pathname = client_path.split('?').next().unwrap_or("");
+        let query = &client_path[pathname.len()..];
+        let same_family = match self {
+            Protocol::Anthropic => pathname.starts_with("/v1/messages"),
+            Protocol::OpenAiChat => {
+                pathname.starts_with("/v1/chat/completions")
+                    || pathname.starts_with("/v1/completions")
+                    || pathname.starts_with("/v1/embeddings")
+            }
+            Protocol::OpenAiResponses => pathname.starts_with("/v1/responses"),
+        };
+        if same_family {
+            return client_path.to_string();
+        }
+        let endpoint = match self {
+            Protocol::Anthropic => "/v1/messages",
+            Protocol::OpenAiChat => "/v1/chat/completions",
+            Protocol::OpenAiResponses => "/v1/responses",
+        };
+        format!("{endpoint}{query}")
     }
 
     // 两种协议的 input 口径不同：anthropic 的 input_tokens 只算没走缓存的那部分
@@ -159,19 +186,24 @@ impl Protocol {
     fn input_includes_cache(&self) -> bool {
         match self {
             Protocol::Anthropic => false,
-            Protocol::Openai => true,
+            Protocol::OpenAiChat | Protocol::OpenAiResponses => true,
         }
     }
 
-    // Anthropic 协议规范认证方式：x-api-key 头；OpenAI 协议规范认证方式：Authorization Bearer
+    // 认证按**上游**格式注入（不是按客户端协议）：转了格式之后，凭据形态得跟着上游走。
+    // Anthropic 用 x-api-key，且缺 anthropic-version 时补一个默认值——客户端是 Codex 时
+    // 它不会带这个头，Anthropic 上游会拒
     pub fn apply_auth(&self, headers: &mut HeaderMap, token: &str) {
         match self {
             Protocol::Anthropic => {
                 if let Ok(value) = axum::http::HeaderValue::from_str(token) {
                     headers.insert("x-api-key", value);
                 }
+                if !headers.contains_key("anthropic-version") {
+                    headers.insert("anthropic-version", axum::http::HeaderValue::from_static("2023-06-01"));
+                }
             }
-            Protocol::Openai => {
+            Protocol::OpenAiChat | Protocol::OpenAiResponses => {
                 if let Ok(value) = axum::http::HeaderValue::from_str(&format!("Bearer {token}")) {
                     headers.insert("authorization", value);
                 }
@@ -197,7 +229,7 @@ impl Protocol {
                     replace_model(payload.get_mut("message").and_then(Value::as_object_mut), client_model);
                 }
             }
-            Protocol::Openai => {
+            Protocol::OpenAiChat | Protocol::OpenAiResponses => {
                 replace_model(payload.as_object_mut(), client_model);
                 replace_model(payload.get_mut("response").and_then(Value::as_object_mut), client_model);
             }
@@ -230,7 +262,7 @@ impl Protocol {
                     cache_write: count_tokens(source.get("cache_creation_input_tokens")),
                 })
             }
-            Protocol::Openai => {
+            Protocol::OpenAiChat | Protocol::OpenAiResponses => {
                 // responses 的流式事件把用量挂在 response 里（response.completed），
                 // 非流式与 chat completions 一样在顶层
                 let nested = payload
@@ -269,7 +301,8 @@ fn cached_tokens(usage: &serde_json::Map<String, Value>) -> Option<i64> {
 pub fn get_adapter(protocol_id: &str) -> Result<Protocol, String> {
     match protocol_id {
         "anthropic" => Ok(Protocol::Anthropic),
-        "openai" => Ok(Protocol::Openai),
+        "openai_chat" => Ok(Protocol::OpenAiChat),
+        "openai_responses" => Ok(Protocol::OpenAiResponses),
         other => Err(format!("未知协议: {other}")),
     }
 }

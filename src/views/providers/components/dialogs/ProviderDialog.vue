@@ -1,22 +1,18 @@
 <script setup>
-// 供应商编辑弹窗：名称、上游地址、token、模型配置列表。
-// 模型是配置条目而不是纯文本：OpenAI 协议的模型可配上下文窗口、输入模态与推理能力
-// （字段口径参考 codex 的 models.json），Anthropic 协议只出模型名——它那边这些属性用不上，
-// 所以属性一行只在 OpenAI 协议下显示。
+// 供应商编辑弹窗：名称、上游地址、token、上游格式、模型配置列表。
+// 供应商是全局的（不属于某个协议），「上游格式」决定代理要不要为它转换协议。
+// 模型是配置条目而不是纯文本：上下文窗口、输入模态与推理能力是给 codex 的 models.json 读的
+// （口径参考 codex 的 models.json），只有会被 responses 侧用到的供应商才需要填，所以那行按需显示。
 // 模型名是映射弹窗「真实模型」下拉的数据源，至少留一个。
 import { computed, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
-import { BaseButton, BaseDialog, BaseInput, FormField, IconButton } from '@/components/base'
+import { AppSelect, BaseButton, BaseDialog, BaseInput, FormField, IconButton } from '@/components/base'
 import { newId } from '@/utils/id'
 
 const props = defineProps({
   modelValue: {
     type: Boolean,
     default: false
-  },
-  protocol: {
-    type: Object,
-    required: true
   },
   provider: {
     type: Object,
@@ -28,15 +24,41 @@ const emit = defineEmits(['update:modelValue', 'saved'])
 
 const configStore = useConfigStore()
 
-const form = ref({ name: '', baseUrl: '', token: '', models: [] })
+const form = ref({ name: '', baseUrl: '', token: '', apiFormat: 'auto', models: [] })
 const showToken = ref(false)
 const error = ref('')
 const fetching = ref(false)
 
 const isEdit = computed(() => !!props.provider)
 
-// 只有 OpenAI 协议的模型显示窗口与模态配置
-const showModelAttrs = computed(() => props.protocol.id === 'openai')
+// 上游格式的选项：auto 是不转换（跟随客户端），其余三种会把请求转成该格式。
+// 顺序按「从最省事到最明确」排：默认项在最前
+const FORMAT_OPTIONS = [
+  { value: 'auto', label: '跟随客户端（不转换）' },
+  { value: 'anthropic', label: 'Anthropic Messages' },
+  { value: 'openai_chat', label: 'OpenAI Chat Completions' },
+  { value: 'openai_responses', label: 'OpenAI Responses' }
+]
+
+// 模型的能力字段是给 codex 的模型清单读的，只有「会被 responses 侧用到」的供应商需要填：
+// 上游格式就是 responses，或者它已经被 OpenAI Responses 协议的某条映射引用。
+// 之前按 protocol.id === 'openai' 判断，协议拆分后那个判据不存在了
+const showModelAttrs = computed(() => {
+  if (form.value.apiFormat === 'openai_responses') return true
+  const id = props.provider?.id
+  if (!id) return false
+  const protocol = configStore.protocols.find((item) => item.id === 'openai_responses')
+  return (protocol?.mappings ?? []).some((mapping) => mapping.providerId === id)
+})
+
+// 编辑一个本来就填过能力字段的供应商时，即使当前用不到也照原样写回：
+// 换个上游格式不该把已经填好的窗口与能力悄悄丢掉
+const providerHadAttrs = computed(() =>
+  (props.provider?.models ?? []).some(
+    (model) => model.contextWindow != null || model.maxContextWindow != null || model.inputModalities != null
+  )
+)
+const writeModelAttrs = computed(() => showModelAttrs.value || providerHadAttrs.value)
 
 // 新建行的默认值照 codex 清单的常规水位给：窗口 1024000、推理默认支持——
 // 大多数模型填个名字就能用，少数不支持推理的自己去掉勾。Anthropic 侧不读这几个字段
@@ -67,22 +89,23 @@ watch(
           name: props.provider.name,
           baseUrl: props.provider.baseUrl,
           token: props.provider.token,
+          apiFormat: props.provider.apiFormat || 'auto',
           models: props.provider.models.map(toRow)
         }
-      : { name: '', baseUrl: '', token: '', models: [emptyModel()] }
+      : { name: '', baseUrl: '', token: '', apiFormat: 'auto', models: [emptyModel()] }
   }
 )
 
 // 表单行 → 配置条目：名称必填，没名字的行直接丢掉；窗口留空不当成 0 存；
 // 文本是模型的底线能力固定带上，图片与推理按勾选。
-// 勾选框只有两态，所以 OpenAI 的模型一律写出 reasoning 布尔值——没勾就是显式 false，
-// 这里不存在「未配置」态；Anthropic 侧整个属性都不写
+// 勾选框只有两态，所以需要填能力的模型一律写出 reasoning 布尔值——没勾就是显式 false，
+// 这里不存在「未配置」态；用不到这些字段的供应商整个属性都不写
 function buildModels() {
   const models = []
   for (const row of form.value.models) {
     const name = row.name.trim()
     if (!name) continue
-    if (!showModelAttrs.value) {
+    if (!writeModelAttrs.value) {
       models.push({ name })
       continue
     }
@@ -114,7 +137,7 @@ function validate() {
     seen.add(name)
   }
   if (duplicated.size > 0) return `模型名不能重复：${[...duplicated].join('、')}`
-  // 窗口只在 OpenAI 协议下可填，不是正整数的挡在保存前，别把 NaN 写进配置。
+  // 窗口只在需要填能力字段时可填，不是正整数的挡在保存前，别把 NaN 写进配置。
   // 没填名字的行保存时会被丢掉，不在这里卡它
   for (const row of form.value.models) {
     const model = row.name.trim()
@@ -148,7 +171,8 @@ async function onFetchModels() {
   error.value = ''
   try {
     const result = await window.electronAPI.fetchProviderModels({
-      protocolId: props.protocol.id,
+      // 拉取按上游格式注入认证：Anthropic 发 x-api-key，OpenAI 一族发 Bearer
+      apiFormat: form.value.apiFormat,
       baseUrl,
       token: form.value.token.trim()
     })
@@ -177,12 +201,13 @@ async function onConfirm() {
   error.value = validate()
   if (error.value) return
 
-  const saved = await configStore.upsertProvider(props.protocol.id, {
+  const saved = await configStore.upsertProvider({
     id: props.provider?.id ?? newId('p'),
     name: form.value.name.trim(),
     enabled: props.provider?.enabled ?? true,
     baseUrl: form.value.baseUrl.trim(),
     token: form.value.token.trim(),
+    apiFormat: form.value.apiFormat,
     models: buildModels()
   })
   if (!saved) {
@@ -209,7 +234,15 @@ async function onConfirm() {
       <BaseInput v-model="form.baseUrl" placeholder="https://open.bigmodel.cn/api/anthropic" />
     </FormField>
 
-    <FormField label="token" hint="按上游协议注入：Anthropic 发 x-api-key，OpenAI 发 Authorization: Bearer">
+    <FormField
+      label="上游格式"
+      required
+      hint="这个上游说什么协议。与客户端协议不同时代理负责转换；不确定就选「跟随客户端」，那是直通"
+    >
+      <AppSelect v-model="form.apiFormat" :options="FORMAT_OPTIONS" full-width />
+    </FormField>
+
+    <FormField label="token" hint="按上游格式注入：Anthropic 发 x-api-key，OpenAI 一族发 Authorization: Bearer">
       <BaseInput v-model="form.token" :type="showToken ? 'text' : 'password'" placeholder="sk-...">
         <template #suffix>
           <IconButton size="sm" :title="showToken ? '隐藏' : '显示'" @click="showToken = !showToken">
@@ -230,7 +263,9 @@ async function onConfirm() {
     <FormField
       label="模型列表"
       required
-      :hint="showModelAttrs ? '上下文窗口按供应商实际口径填（tokens）；留空表示未配置' : '模型名会出现在映射弹窗的「真实模型」下拉里'"
+      :hint="showModelAttrs
+        ? '上下文窗口按供应商实际口径填（tokens）；留空表示未配置'
+        : '模型名会出现在映射弹窗的「真实模型」下拉里。上游格式选 OpenAI Responses（或已被 Responses 协议的映射引用）时，这里会多出窗口与能力字段——codex 的模型清单要读它们'"
     >
       <template #label-extra>
         <BaseButton
