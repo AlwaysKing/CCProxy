@@ -282,6 +282,76 @@ async fn end_to_end_openai_uses_bearer() {
     let _ = mock_stop.send(());
 }
 
+// Codex 走 responses 线格式：用量在流式终止事件里、模型名在 response.model 上，
+// 端到端要能记进用量聚合、也要把真实模型名换回客户端名
+#[tokio::test]
+async fn end_to_end_responses_stream_records_usage() {
+    let captured = sink();
+    let (mock_port, mock_stop) = mock_upstream(captured.clone(), |_| {
+        sse_response(
+            [
+                "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"deepseek-vl-flash\"},\"sequence_number\":0}\n\n",
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"deepseek-vl-flash\",\"status\":\"completed\",\"usage\":{\"input_tokens\":120,\"input_tokens_details\":{\"cached_tokens\":64},\"output_tokens\":45,\"output_tokens_details\":{\"reasoning_tokens\":12},\"total_tokens\":165}}}\n\n",
+            ]
+            .concat(),
+        )
+    })
+    .await;
+
+    let dir = TempDir::new("ccproxy-e2e");
+    let state = test_state(
+        config_with_port(
+            json!({
+                "protocols": [{
+                    "id": "openai", "name": "OpenAI", "enabled": true,
+                    "providers": [{
+                        "id": "q1", "name": "mock上游", "enabled": true,
+                        "baseUrl": format!("http://127.0.0.1:{mock_port}/v1"),
+                        "token": "sk-real-openai",
+                        "models": [{ "name": "deepseek-vl-flash" }]
+                    }],
+                    "mappings": [
+                        { "id": "m1", "enabled": true, "clientModel": "deepseek-flash", "providerId": "q1", "realModel": "deepseek-vl-flash" }
+                    ]
+                }]
+            }),
+            0,
+        ),
+        &dir,
+    );
+    let port = start_proxy(&state).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer sk-fake")
+        .header("accept", "text/event-stream")
+        .body(serde_json::to_vec(&json!({ "model": "deepseek-flash", "stream": true, "input": [] })).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let text = response.text().await.unwrap();
+    assert!(text.contains("response.completed"));
+    let seen = last_captured(&captured);
+    assert_eq!(seen.url, "/v1/responses");
+    // 请求侧：发给上游的是真实模型名；响应侧：客户端看到的必须是映射名
+    assert_eq!(seen.body["model"], json!("deepseek-vl-flash"));
+    assert!(text.contains("\"model\":\"deepseek-flash\""), "实际：{text}");
+    assert!(!text.contains("deepseek-vl-flash"), "真实模型名不该回给客户端：{text}");
+
+    let usage = state.request_log.usage(&json!({ "days": 1 }));
+    assert_eq!(usage["totals"]["requests"], json!(1));
+    assert_eq!(usage["totals"]["input"], json!(120));
+    assert_eq!(usage["totals"]["output"], json!(45));
+    // responses 的 input_tokens 含缓存命中，缓存只作为明细一路传到用量聚合里
+    assert_eq!(usage["totals"]["cacheRead"], json!(64));
+    assert_eq!(usage["byModel"][0]["key"], json!("deepseek-vl-flash"));
+
+    state.proxy.stop().await;
+    let _ = mock_stop.send(());
+}
+
 #[tokio::test]
 async fn end_to_end_mapping_miss_is_404() {
     let captured = sink();
@@ -309,23 +379,30 @@ async fn end_to_end_mapping_miss_is_404() {
 }
 
 #[tokio::test]
-async fn end_to_end_undetectable_request_is_400_with_scores() {
+async fn end_to_end_unknown_path_is_400() {
     let dir = TempDir::new("ccproxy-e2e");
     let state = test_state(config_with_port(anthropic_config(1, "claude-*"), 0), &dir);
     let port = start_proxy(&state).await;
 
+    // 带齐 Anthropic 的头与请求体特征：协议只看路径，这些特征救不回一条不认识的路径
     let response = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/foo"))
         .header("content-type", "application/json")
-        .body("{}")
+        .header("anthropic-version", "2023-06-01")
+        .header("x-api-key", "sk-fake")
+        .body(claude_body("claude-sonnet-4-20250514", false))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), 400);
     let payload: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
     assert_eq!(payload["error"]["type"], json!("ccproxy_detect"));
-    assert_eq!(payload["error"]["detail"]["scores"]["anthropic"], json!(0));
-    assert_eq!(payload["error"]["detail"]["scores"]["openai"], json!(0));
+    // 文案要把认识的路径列出来，用户照着改 baseURL 就能通
+    let message = payload["error"]["message"].as_str().unwrap();
+    assert!(message.contains("/foo"));
+    assert!(message.contains("/v1/messages"));
+    assert!(message.contains("/v1/responses"));
+    assert!(payload["error"].get("detail").is_none());
 
     state.proxy.stop().await;
 }

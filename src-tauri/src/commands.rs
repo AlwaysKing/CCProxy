@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tauri::State;
 
-use crate::clients::{apply_client_config, detect_dir_kind, inspect_client_config, scan_client_dirs};
+use crate::clients::{apply_client_config, daemon, detect_dir_kind, inspect_client_config, scan_client_dirs};
 use crate::config::{create_config_id, ClientDir};
 use crate::logger;
 use crate::proxy::fetch_models::fetch_upstream_models;
@@ -102,6 +102,27 @@ pub async fn get_client_dirs(state: State<'_, Arc<AppState>>) -> Result<Value, S
         "dropped": scan.dropped,
         "expectedAddress": format!("http://127.0.0.1:{}", config.settings.port)
     }))
+}
+
+// codex 的 app-server daemon 体检。它只在启动时读一次 config.toml 与模型清单，
+// 磁盘改完它还是旧的——设置页据此提醒用户执行 `codex app-server daemon restart`。
+// 有多个 codex 目录时优先报正在跑的那个；一个都没跑就报第一个，界面上换成条件式说法
+#[tauri::command]
+pub async fn get_codex_daemon(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    let config = state.config_snapshot();
+    let scan = scan_client_dirs(None, &config.settings.client_dirs);
+    let mut entries = scan.builtin;
+    entries.extend(scan.manual);
+
+    let mut first: Option<daemon::CodexDaemon> = None;
+    for entry in entries.iter().filter(|item| item.kind == "codex") {
+        let status = daemon::inspect(&entry.path);
+        if status.running {
+            return Ok(json!({ "success": true, "daemon": status }));
+        }
+        first = first.or(Some(status));
+    }
+    Ok(json!({ "success": true, "daemon": first }))
 }
 
 #[tauri::command]

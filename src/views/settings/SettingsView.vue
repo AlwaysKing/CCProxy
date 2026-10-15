@@ -102,6 +102,19 @@ const onAddDir = () => clientDirsStore.add()
 const onRemoveDir = (entry) => clientDirsStore.remove(entry)
 const onApplyDir = (entry) => clientDirsStore.applyConfig(entry)
 
+// codex 的 app-server daemon 只在启动时把 config.toml 与模型清单读进内存：
+// CCProxy 写的是磁盘，daemon 手里那份还是旧的，所以得提醒用户重启它才会生效
+const codexDaemon = computed(() => clientDirsStore.daemon)
+
+async function onCopyRestartCommand() {
+  const command = codexDaemon.value?.restartCommand || 'codex app-server daemon restart'
+  try {
+    await navigator.clipboard.writeText(command)
+  } catch (e) {
+    notice.value = '复制失败'
+  }
+}
+
 // 两种数据的清理语义不同（见 request-log 的注释），所以分两个入口而不是一个「清空数据」
 const STORAGE_ROWS = computed(() => [
   {
@@ -109,7 +122,7 @@ const STORAGE_ROWS = computed(() => [
     name: '请求日志',
     settingKey: 'logsEnabled',
     enabled: logsEnabled.value,
-    desc: '每个请求的完整记录（含识别打分、错误详情），按天分文件',
+    desc: '每个请求的完整记录（含错误详情），按天分文件',
     files: stats.value?.logs?.files ?? 0,
     bytes: stats.value?.logs?.bytes ?? 0
   },
@@ -270,6 +283,26 @@ onMounted(() => {
           </div>
         </div>
         <span v-else class="dirs-empty">未发现</span>
+        <!-- codex 侧还有一层缓存：长期在跑的 app-server daemon。写到磁盘的东西它不重读，
+             所以这一行要留在目录列表里——用户「改了没生效」时第一眼能看见怎么办 -->
+        <p
+          v-if="group.kind === 'codex' && codexDaemon"
+          class="dirs-daemon"
+          :class="{ 'dirs-daemon-live': codexDaemon.running }"
+        >
+          <span class="dirs-daemon-text">
+            <template v-if="codexDaemon.running">Codex 的 app-server daemon 正在运行（PID {{ codexDaemon.pid }}），它只在启动时读一次 config.toml 与模型清单：改完地址 / token / 模型后要执行</template>
+            <template v-else>如果 Codex 侧在用 app-server daemon，改完地址 / token / 模型后要执行</template>
+            <code>{{ codexDaemon.restartCommand }}</code>
+            才会生效（正在跑的会话会被打断）
+          </span>
+          <IconButton size="sm" :title="`复制 ${codexDaemon.restartCommand}`" @click="onCopyRestartCommand">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          </IconButton>
+        </p>
       </div>
 
       <p v-if="dirNotice" class="dirs-notice">{{ dirNotice }}</p>
@@ -458,6 +491,37 @@ onMounted(() => {
 .dirs-empty {
   color: var(--text-secondary);
   font-size: var(--font-size-sm);
+}
+
+/* codex daemon 提醒：没检测到 daemon 时是灰色说明，检测到了才提色提醒 */
+.dirs-daemon {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin: var(--spacing-xs) 0 0;
+  padding-top: var(--spacing-xs);
+  border-top: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.dirs-daemon-live {
+  color: var(--color-warning);
+}
+
+.dirs-daemon-text {
+  flex: 1 1 auto;
+  line-height: 1.6;
+}
+
+/* 命令要能一眼抄走：等宽 + 底衬，和正文拉开距离 */
+.dirs-daemon code {
+  margin: 0 4px;
+  padding: 1px 6px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-family-mono);
 }
 
 .dirs-notice {

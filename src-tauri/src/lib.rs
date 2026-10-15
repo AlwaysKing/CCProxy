@@ -161,6 +161,7 @@ pub fn run() {
             commands::save_config,
             commands::regenerate_client_token,
             commands::get_client_dirs,
+            commands::get_codex_daemon,
             commands::pick_client_dir,
             commands::add_client_dir,
             commands::apply_client_dir,

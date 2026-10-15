@@ -52,6 +52,7 @@ export function installTauriBridge() {
     restartProxy: () => invoke('restart_proxy'),
     fetchProviderModels: (payload) => invoke('fetch_provider_models', { payload }),
     getClientDirs: () => invoke('get_client_dirs'),
+    getCodexDaemon: () => invoke('get_codex_daemon'),
     pickClientDir: () => invoke('pick_client_dir'),
     addClientDir: (dirPath) => invoke('add_client_dir', { path: dirPath }),
     applyClientDir: (dirPath) => invoke('apply_client_dir', { path: dirPath }),
