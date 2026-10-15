@@ -20,6 +20,7 @@ use crate::proxy::upstream::{
     build_upstream_url, passthrough_response_headers, sanitize_outbound_headers, send_upstream, NON_STREAM_TIMEOUT_MS,
     STREAM_IDLE_TIMEOUT_MS,
 };
+use crate::convert::bridge as convert_bridge;
 use crate::state::AppState;
 
 pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -103,6 +104,28 @@ fn json_response(status: u16, payload: &Value) -> Response<Body> {
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
+// 是否为 Anthropic 的 token 计数请求
+fn is_count_tokens_path(path: &str) -> bool {
+    path.split('?').next().unwrap_or("").starts_with("/v1/messages/count_tokens")
+}
+
+// 本地 token 估算：把请求体里所有字符串按 4 个字符 1 token 估。
+// 只在「上游不是 Anthropic」时用：那时没有对方的 tokenizer 可用，而 Claude Code
+// 拿这个数只做上下文预估，估个大概比把请求发给不认这个端点的上游强
+fn estimate_input_tokens(payload: &Value) -> i64 {
+    fn walk(value: &Value, chars: &mut usize) {
+        match value {
+            Value::String(text) => *chars += text.chars().count(),
+            Value::Array(items) => items.iter().for_each(|item| walk(item, chars)),
+            Value::Object(map) => map.values().for_each(|item| walk(item, chars)),
+            _ => {}
+        }
+    }
+    let mut chars = 0usize;
+    walk(payload, &mut chars);
+    (chars / 4).max(1) as i64
+}
+
 struct BodyError {
     status: u16,
     code: &'static str,
@@ -175,7 +198,9 @@ fn find_event_boundary(bytes: &[u8]) -> Option<usize> {
     bytes.windows(2).position(|pair| pair == b"\n\n")
 }
 
-type UpstreamStream = Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>;
+// 上游字节流：错误统一化成 String——透传时是 reqwest 的错误，转换时是转换器的 io 错误，
+// 汇到一条错误通道里，下游只需要一种处理
+type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, String>> + Send>>;
 
 struct StreamState {
     upstream: UpstreamStream,
@@ -192,15 +217,17 @@ fn rewrite_event(rewriter: &Option<Arc<ResponseRewriter>>, event: Bytes) -> Byte
     }
 }
 
-// 流式转发：按 SSE 事件边界（\n\n）凑齐一个事件改写一个，空闲超时按块重置
+// 流式转发：按 SSE 事件边界（\n\n）凑齐一个事件改写一个，空闲超时按块重置。
+// source 可能是上游原始 SSE（透传），也可能是转换器吐出的客户端格式 SSE——
+// 两条路在这里汇合，后面的 model 回写与用量提取对它们一视同仁
 fn make_stream(
-    upstream: reqwest::Response,
+    source: UpstreamStream,
     rewriter: Option<Arc<ResponseRewriter>>,
     hook: FinishHook,
     status: u16,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     let state = StreamState {
-        upstream: Box::pin(upstream.bytes_stream()),
+        upstream: source,
         pending: BytesMut::new(),
         rewriter,
         guard: CancelGuard { hook },
@@ -223,9 +250,8 @@ fn make_stream(
             .await;
             match next {
                 Ok(Some(Ok(chunk))) => state.pending.extend_from_slice(&chunk),
-                Ok(Some(Err(error))) => {
+                Ok(Some(Err(message))) => {
                     state.finished = true;
-                    let message = error.to_string();
                     fire_hook(
                         &state.guard.hook,
                         ForwardOutcome { status_code: status, error: Some(message.clone()), cancelled: false },
@@ -387,16 +413,87 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
         }
     };
 
-    let Ok(adapter) = get_adapter(&protocol_id) else {
-        return json_response(500, &json!({ "error": { "type": "ccproxy_internal", "message": "未知协议" } }));
+    // 上游格式：auto 表示跟随客户端。认证方式、端点改写与要不要转换都按它决定
+    let upstream_format = if route.api_format.is_empty() || route.api_format == "auto" {
+        protocol_id.to_string()
+    } else {
+        route.api_format.clone()
     };
+    let Ok(adapter) = get_adapter(&upstream_format) else {
+        return json_response(
+            500,
+            &json!({ "error": { "type": "ccproxy_internal", "message": format!("未知的上游格式：{}", route.api_format) } }),
+        );
+    };
+    // 响应回写与用量按**客户端**格式算：转换后的响应已经是客户端格式了
+    let client_adapter = get_adapter(&protocol_id).ok();
+    let converting = convert_bridge::needs_conversion(&protocol_id, &upstream_format);
 
-    // 改写 model 字段；只有真的变了才重新序列化，没变就原样字节透传
+    // /v1/messages/count_tokens 且上游不是 Anthropic：这个端点转不了（拿不到对方的 tokenizer），
+    // 本地估一个整数返回，不让这类请求打到不认它的上游
+    if protocol_id == "anthropic" && is_count_tokens_path(&path) && upstream_format != "anthropic" {
+        let tokens = estimate_input_tokens(payload.as_ref().unwrap_or(&Value::Null));
+        let entry = make_log_entry(
+            &id,
+            started_at,
+            method.as_str(),
+            &path,
+            LogFields {
+                protocol: Some(protocol_id.to_string()),
+                client_model: Some(client_model.clone()),
+                provider_id: Some(route.provider_id.clone()),
+                provider_name: Some(route.provider_name.clone()),
+                real_model: Some(route.real_model.clone()),
+                status_code: 200,
+                outcome: "count_tokens_local".to_string(),
+                ..Default::default()
+            },
+        );
+        emit_log(&state, &entry);
+        return json_response(200, &json!({ "input_tokens": tokens }));
+    }
+
+    // 请求体：先换 model，再按「客户端格式 → 上游格式」整段转换。
+    // 不转换且 model 没变时保持原样字节透传
+    let original_request = payload.clone().unwrap_or(Value::Null);
     let mut forward_body = body.clone();
-    if let Some(mut payload) = payload {
-        if payload.get("model").and_then(Value::as_str) != Some(route.real_model.as_str()) {
-            adapter.rewrite_model(&mut payload, &route.real_model);
-            if let Ok(encoded) = serde_json::to_vec(&payload) {
+    if let Some(payload) = payload.as_ref() {
+        let mut next = payload.clone();
+        adapter.rewrite_model(&mut next, &route.real_model);
+        if converting {
+            // Responses → Chat 之前先补历史：客户端只回传 tool_call id 时参数要靠它找回来
+            convert_bridge::enrich_request(&protocol_id, &upstream_format, &mut next).await;
+            match convert_bridge::convert_request(&protocol_id, &upstream_format, &next) {
+                Ok(converted) => next = converted,
+                Err(message) => {
+                    let entry = make_log_entry(
+                        &id,
+                        started_at,
+                        method.as_str(),
+                        &path,
+                        LogFields {
+                            protocol: Some(protocol_id.to_string()),
+                            client_model: Some(client_model.clone()),
+                            provider_id: Some(route.provider_id.clone()),
+                            provider_name: Some(route.provider_name.clone()),
+                            real_model: Some(route.real_model.clone()),
+                            status_code: 502,
+                            outcome: "convert_failed".to_string(),
+                            error_code: Some("convert_request_failed".to_string()),
+                            error: Some(message.clone()),
+                            ..Default::default()
+                        },
+                    );
+                    emit_log(&state, &entry);
+                    return json_response(
+                        502,
+                        &json!({ "error": { "type": "ccproxy_convert", "message": message } }),
+                    );
+                }
+            }
+        }
+        if converting || payload.get("model").and_then(Value::as_str) != Some(route.real_model.as_str()) {
+            if let Ok(encoded) = serde_json::to_vec(&next) {
                 forward_body = Bytes::from(encoded);
             }
         }
@@ -410,13 +507,14 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
         outbound_headers.insert("content-length", value);
     }
 
-    let url = build_upstream_url(&route.base_url, &path);
+    // 端点按上游格式改写：客户端说 Anthropic、上游说 Chat 时，路径要换成 chat 的端点
+    let url = build_upstream_url(&route.base_url, &adapter.upstream_path(&path));
 
     // 响应回写：把上游回传的真实模型名换回 clientModel。请求体里连 model 都没有时不回写
     let rewriter = if client_model.is_empty() {
         None
     } else {
-        Some(Arc::new(ResponseRewriter::new(adapter, &client_model)))
+        client_adapter.map(|adapter| Arc::new(ResponseRewriter::new(adapter, &client_model)))
     };
 
     let build_entry: LogSink = {
@@ -477,7 +575,138 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
     let status = upstream.status().as_u16();
     let upstream_headers = upstream.headers().clone();
 
+    // 上游是否按 SSE 回话：没标 text/event-stream 时要当心它压根没理会 stream 参数
+    let upstream_is_sse = upstream_headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase().contains("text/event-stream"))
+        .unwrap_or(false);
+
+    // 转换方向下上游报错时，错误体也换一套形状（状态码保留）。这一步要赶在流式分支之前：
+    // 错误体不是 SSE，交给状态机会被解成垃圾
+    if converting && !(200..300).contains(&status) {
+        let body_bytes = tokio::time::timeout(Duration::from_millis(NON_STREAM_TIMEOUT_MS), upstream.bytes())
+            .await
+            .ok()
+            .and_then(|result| result.ok())
+            .unwrap_or_default();
+        let out = convert_bridge::error_body_for_client(&protocol_id, status, &body_bytes)
+            .map(Bytes::from)
+            .unwrap_or(body_bytes);
+        build_entry(
+            ForwardOutcome {
+                status_code: status,
+                error: Some(format!("上游返回 HTTP {status}")),
+                cancelled: false,
+            },
+            None,
+        );
+        let mut builder = Response::builder().status(status);
+        if let Some(headers_mut) = builder.headers_mut() {
+            *headers_mut = passthrough_response_headers(&upstream_headers, true);
+            headers_mut.insert("content-type", HeaderValue::from_static("application/json"));
+            if let Ok(value) = HeaderValue::from_str(&out.len().to_string()) {
+                headers_mut.insert("content-length", value);
+            }
+        }
+        return builder.body(Body::from(out)).unwrap_or_else(|_| Response::new(Body::empty()));
+    }
+
+    // 转换过的响应体形状与上游不同，报错体的形状各家不一，硬转容易把失败原因转丢：
+    // 上游报错时不转换，状态码与原始错误体一起透传
+    let converting_body = converting && (200..300).contains(&status);
+
     if is_streaming {
+        // 上游没按 stream 参数办事（content-type 不是 SSE）时先整块读回来：客户端等的是 SSE，
+        // 把一整块 JSON 丢过去它只会当成空响应。先转成客户端格式，再展开成 SSE 生命周期
+        if !upstream_is_sse {
+            let collected =
+                match tokio::time::timeout(Duration::from_millis(NON_STREAM_TIMEOUT_MS), upstream.bytes()).await {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(error)) => {
+                        let message = error.to_string();
+                        build_entry(
+                            ForwardOutcome { status_code: 502, error: Some(message.clone()), cancelled: false },
+                            None,
+                        );
+                        return json_response(
+                            502,
+                            &json!({ "error": { "type": "ccproxy_upstream", "message": format!("上游请求失败: {message}") } }),
+                        );
+                    }
+                    Err(_) => {
+                        let message = format!("上游响应超过 {NON_STREAM_TIMEOUT_MS}ms");
+                        build_entry(
+                            ForwardOutcome { status_code: 502, error: Some(message.clone()), cancelled: false },
+                            None,
+                        );
+                        return json_response(502, &json!({ "error": { "type": "ccproxy_upstream", "message": message } }));
+                    }
+                };
+
+            let parsed = serde_json::from_slice::<Value>(&collected).ok();
+            let client_value = match (parsed, converting_body) {
+                (Some(value), true) => {
+                    match convert_bridge::convert_response(&protocol_id, &upstream_format, &original_request, value)
+                        .await
+                    {
+                        Ok(converted) => Some(converted),
+                        Err(message) => {
+                            build_entry(
+                                ForwardOutcome { status_code: 502, error: Some(message.clone()), cancelled: false },
+                                None,
+                            );
+                            return json_response(
+                                502,
+                                &json!({ "error": { "type": "ccproxy_convert", "message": message } }),
+                            );
+                        }
+                    }
+                }
+                (value, _) => value,
+            };
+
+            // 先回写 model（展开器要从 message / response 里取它），再展开给客户端
+            if let Some(value) = client_value.filter(|value| !convert_bridge::is_error_envelope(value)) {
+                let encoded = Bytes::from(serde_json::to_vec(&value).unwrap_or_default());
+                let rewritten = match &rewriter {
+                    Some(rewriter) => rewriter.rewrite_body(&encoded),
+                    None => encoded,
+                };
+                if let Ok(parsed) = serde_json::from_slice::<Value>(&rewritten) {
+                    if let Ok(events) = convert_bridge::json_to_sse(&protocol_id, &parsed) {
+                        let out: Vec<u8> = events.iter().flat_map(|item| item.to_vec()).collect();
+                        let tokens = rewriter
+                            .as_ref()
+                            .and_then(|rewriter| rewriter.usage())
+                            .map(|usage| usage.to_json());
+                        build_entry(
+                            ForwardOutcome { status_code: status, error: None, cancelled: false },
+                            tokens,
+                        );
+                        let mut builder = Response::builder().status(status);
+                        if let Some(headers_mut) = builder.headers_mut() {
+                            headers_mut.insert("content-type", HeaderValue::from_static("text/event-stream"));
+                            headers_mut.insert("cache-control", HeaderValue::from_static("no-cache"));
+                            if let Ok(value) = HeaderValue::from_str(&out.len().to_string()) {
+                                headers_mut.insert("content-length", value);
+                            }
+                        }
+                        return builder.body(Body::from(out)).unwrap_or_else(|_| Response::new(Body::empty()));
+                    }
+                }
+            }
+
+            // 展不开（客户端协议没有展开器、或响应本身就是错误信封）就原样回：
+            // 绝不伪造一个「成功但空」的 SSE，那是最难查的一种失败
+            build_entry(ForwardOutcome { status_code: status, error: None, cancelled: false }, None);
+            let mut builder = Response::builder().status(status);
+            if let Some(headers_mut) = builder.headers_mut() {
+                *headers_mut = passthrough_response_headers(&upstream_headers, false);
+            }
+            return builder.body(Body::from(collected)).unwrap_or_else(|_| Response::new(Body::empty()));
+        }
+
         // 流式：边收边写，收尾（或客户端断开）时补埋点
         let hook: FinishHook = Arc::new(Mutex::new(Some({
             let build_entry = build_entry.clone();
@@ -490,7 +719,42 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
                 build_entry(outcome, tokens);
             }) as Box<dyn FnOnce(ForwardOutcome) + Send>
         })));
-        let body = Body::from_stream(make_stream(upstream, rewriter.clone(), hook, status));
+        // 需要的字节流：透传时是上游原始 SSE，转换时是上游 SSE 经状态机吐出的客户端格式 SSE
+        let raw = upstream.bytes_stream();
+        let source: UpstreamStream = if converting_body {
+            let mapped = raw.map(|item| item.map_err(|error| convert_bridge::StreamError(error.to_string())));
+            match convert_bridge::convert_stream(&protocol_id, &upstream_format, &original_request, mapped) {
+                Ok(converted) => Box::pin(converted.map(|item| item.map_err(|error| error.to_string()))),
+                Err(message) => {
+                    let entry = make_log_entry(
+                        &id,
+                        started_at,
+                        method.as_str(),
+                        &path,
+                        LogFields {
+                            protocol: Some(protocol_id.to_string()),
+                            client_model: Some(client_model.clone()),
+                            provider_id: Some(route.provider_id.clone()),
+                            provider_name: Some(route.provider_name.clone()),
+                            real_model: Some(route.real_model.clone()),
+                            status_code: 502,
+                            outcome: "convert_failed".to_string(),
+                            error_code: Some("convert_stream_failed".to_string()),
+                            error: Some(message.clone()),
+                            ..Default::default()
+                        },
+                    );
+                    emit_log(&state, &entry);
+                    return json_response(
+                        502,
+                        &json!({ "error": { "type": "ccproxy_convert", "message": message } }),
+                    );
+                }
+            }
+        } else {
+            Box::pin(raw.map(|item| item.map_err(|error| error.to_string())))
+        };
+        let body = Body::from_stream(make_stream(source, rewriter.clone(), hook, status));
         let mut builder = Response::builder().status(status);
         if let Some(headers_mut) = builder.headers_mut() {
             *headers_mut = passthrough_response_headers(&upstream_headers, rewriter.is_some());
@@ -525,9 +789,64 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
         }
     };
 
-    let out = match &rewriter {
-        Some(rewriter) => rewriter.rewrite_body(&collected),
-        None => collected,
+    // 非流式：转换后的响应体已经是客户端格式，model 回写与用量提取都按客户端格式做
+    let out = if converting_body {
+        match serde_json::from_slice::<Value>(&collected) {
+            Ok(parsed) => {
+                match convert_bridge::convert_response(&protocol_id, &upstream_format, &original_request, parsed)
+                    .await
+                {
+                    Ok(converted) => {
+                        let bytes = Bytes::from(serde_json::to_vec(&converted).unwrap_or_default());
+                        match &rewriter {
+                            Some(rewriter) => rewriter.rewrite_body(&bytes),
+                            None => bytes,
+                        }
+                    }
+                    Err(message) => {
+                        build_entry(
+                            ForwardOutcome {
+                                status_code: 502,
+                                error: Some(message.clone()),
+                                cancelled: false,
+                            },
+                            None,
+                        );
+                        return json_response(
+                            502,
+                            &json!({ "error": { "type": "ccproxy_convert", "message": message } }),
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                let text = String::from_utf8_lossy(&collected);
+                let looks_like_sse = ["data:", "event:", "id:", "retry:"]
+                    .iter()
+                    .any(|prefix| text.trim_start_matches('\u{feff}').trim_start().starts_with(prefix));
+                if looks_like_sse {
+                    // 上游回了 SSE，而客户端要的是整块（转不了）：原样透传比编一个 502 诚实，
+                    // 客户端至少能自己看出上游回的是什么
+                    build_entry(ForwardOutcome { status_code: status, error: None, cancelled: false }, None);
+                    let mut builder = Response::builder().status(status);
+                    if let Some(headers_mut) = builder.headers_mut() {
+                        *headers_mut = passthrough_response_headers(&upstream_headers, false);
+                    }
+                    return builder.body(Body::from(collected)).unwrap_or_else(|_| Response::new(Body::empty()));
+                }
+                let message = format!("上游响应不是合法 JSON，无法转换：{error}");
+                build_entry(
+                    ForwardOutcome { status_code: 502, error: Some(message.clone()), cancelled: false },
+                    None,
+                );
+                return json_response(502, &json!({ "error": { "type": "ccproxy_convert", "message": message } }));
+            }
+        }
+    } else {
+        match &rewriter {
+            Some(rewriter) => rewriter.rewrite_body(&collected),
+            None => collected,
+        }
     };
     let tokens = rewriter
         .as_ref()
@@ -535,10 +854,12 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
         .map(|usage| usage.to_json());
     build_entry(ForwardOutcome { status_code: status, error: None, cancelled: false }, tokens);
 
+    // 响应体被改过（回写 model 或做过转换）时 content-length 都要按新的算
+    let rebuilt_length = rewriter.is_some() || converting_body;
     let mut builder = Response::builder().status(status);
     if let Some(headers_mut) = builder.headers_mut() {
-        *headers_mut = passthrough_response_headers(&upstream_headers, rewriter.is_some());
-        if rewriter.is_some() {
+        *headers_mut = passthrough_response_headers(&upstream_headers, rebuilt_length);
+        if rebuilt_length {
             if let Ok(value) = HeaderValue::from_str(&out.len().to_string()) {
                 headers_mut.insert("content-length", value);
             }

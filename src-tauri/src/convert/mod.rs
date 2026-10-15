@@ -14,6 +14,7 @@
 
 pub mod provider;
 
+pub mod bridge;
 pub(crate) mod error;
 pub(crate) mod json_canonical;
 pub(crate) mod providers;
