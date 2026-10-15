@@ -46,11 +46,77 @@ fn exact_beats_wildcard_and_fallback() {
 }
 
 #[test]
-fn provider_api_format_reaches_the_route() {
-    // 上游格式是转换方向的依据，必须原样带到路由结果里
+fn openai_group_uses_chat_for_anthropic_clients() {
+    // Anthropic 客户端映射到 OpenAI 模型组时，默认走 Chat 转换。
     let config = base(|value| {
         value["protocols"][0]["providers"][0]["apiFormat"] = json!("openai_responses");
     });
+    let route = resolve_routing(&config, "anthropic", "claude-sonnet-4").unwrap();
+    assert_eq!(route.api_format, "openai_chat");
+    assert_eq!(route.model_group_id, "g_openai");
+}
+
+#[test]
+fn openai_group_uses_responses_for_responses_clients() {
+    let config = config_from(json!({
+        "providers": [{
+            "id": "p1",
+            "name": "OpenAI",
+            "enabled": true,
+            "baseUrl": "http://upstream.test",
+            "token": "t",
+            "modelGroups": [{
+                "id": "g_openai",
+                "apiFormat": "openai",
+                "models": [{ "name": "gpt-5.5" }]
+            }]
+        }],
+        "protocols": [{
+            "id": "openai_responses",
+            "enabled": true,
+            "mappings": [{
+                "id": "m1",
+                "enabled": true,
+                "clientModel": "gpt-5.5",
+                "providerId": "p1",
+                "modelGroupId": "g_openai",
+                "realModel": "gpt-5.5"
+            }]
+        }]
+    }));
+    let route = resolve_routing(&config, "openai_responses", "gpt-5.5").unwrap();
+    assert_eq!(route.api_format, "openai_responses");
+}
+
+#[test]
+fn mapping_upstream_protocol_overrides_client_protocol() {
+    let config = config_from(json!({
+        "providers": [{
+            "id": "p1",
+            "name": "OpenAI",
+            "enabled": true,
+            "baseUrl": "http://upstream.test",
+            "token": "t",
+            "modelGroups": [{
+                "id": "g_openai",
+                "apiFormat": "openai",
+                "models": [{ "name": "gpt-5.5" }]
+            }]
+        }],
+        "protocols": [{
+            "id": "anthropic",
+            "enabled": true,
+            "mappings": [{
+                "id": "m1",
+                "enabled": true,
+                "clientModel": "claude-*",
+                "providerId": "p1",
+                "modelGroupId": "g_openai",
+                "upstreamProtocol": "openai_responses",
+                "realModel": "gpt-5.5"
+            }]
+        }]
+    }));
     let route = resolve_routing(&config, "anthropic", "claude-sonnet-4").unwrap();
     assert_eq!(route.api_format, "openai_responses");
 }
@@ -133,8 +199,22 @@ fn unknown_protocol_is_404() {
 #[test]
 fn match_kind_marks_the_winning_round() {
     // 界面的「精确/通配/兜底」徽章直接读这个字段
-    assert_eq!(resolve_routing(&plain(), "anthropic", "claude-sonnet-4").unwrap().match_kind, "exact");
-    assert_eq!(resolve_routing(&plain(), "anthropic", "claude-opus-9").unwrap().match_kind, "wildcard");
-    assert_eq!(resolve_routing(&plain(), "anthropic", "totally-other-model").unwrap().match_kind, "fallback");
+    assert_eq!(
+        resolve_routing(&plain(), "anthropic", "claude-sonnet-4")
+            .unwrap()
+            .match_kind,
+        "exact"
+    );
+    assert_eq!(
+        resolve_routing(&plain(), "anthropic", "claude-opus-9")
+            .unwrap()
+            .match_kind,
+        "wildcard"
+    );
+    assert_eq!(
+        resolve_routing(&plain(), "anthropic", "totally-other-model")
+            .unwrap()
+            .match_kind,
+        "fallback"
+    );
 }
-

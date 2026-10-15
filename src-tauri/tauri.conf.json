@@ -15,6 +15,7 @@
       {
         "label": "main",
         "title": "CCProxy",
+        "visible": false,
         "width": 1180,
         "height": 780,
         "minWidth": 940,

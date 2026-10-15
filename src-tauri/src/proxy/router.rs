@@ -2,7 +2,7 @@
 // 优先级：精确匹配 > 通配匹配（前缀最长者优先）> 兜底规则（clientModel 为 *）。
 // 启停规则：协议停用报 503；供应商或单条映射停用的条目视为不可用直接跳过。
 
-use crate::config::{AppConfig, Mapping};
+use crate::config::{AppConfig, Mapping, ModelGroup, Provider};
 
 #[derive(Debug, Clone)]
 pub struct Route {
@@ -10,9 +10,10 @@ pub struct Route {
     pub protocol_name: String,
     pub provider_id: String,
     pub provider_name: String,
+    pub model_group_id: String,
     pub base_url: String,
     pub token: String,
-    // 供应商声明的上游线格式：auto | anthropic | openai_chat | openai_responses
+    // 实际发送给上游的线格式：anthropic | openai_chat | openai_responses
     pub api_format: String,
     pub mapping: Mapping,
     pub match_kind: String,
@@ -66,7 +67,7 @@ pub fn resolve_routing(config: &AppConfig, protocol_id: &str, client_model: &str
 
     // 只保留可用条目：映射启用、供应商存在且启用。
     // 供应商现在挂在配置顶层（三个协议共用），所以从 config.providers 里找而不是协议下
-    let mut usable: Vec<(&Mapping, &crate::config::Provider)> = Vec::new();
+    let mut usable: Vec<(&Mapping, &Provider, &ModelGroup)> = Vec::new();
     for mapping in &protocol.mappings {
         if !mapping.enabled {
             continue;
@@ -77,18 +78,21 @@ pub fn resolve_routing(config: &AppConfig, protocol_id: &str, client_model: &str
         if !provider.enabled {
             continue;
         }
-        usable.push((mapping, provider));
+        let Some(group) = provider.model_groups.iter().find(|item| item.id == mapping.model_group_id) else {
+            continue;
+        };
+        usable.push((mapping, provider, group));
     }
 
     // 三轮各记一个 matchKind：请求日志要写「命中规则」，而「是哪一轮命中的」只有这里知道。
     // 第一轮：精确匹配
-    let mut hit = usable.iter().find(|(mapping, _)| mapping.client_model == client_model);
+    let mut hit = usable.iter().find(|(mapping, _, _)| mapping.client_model == client_model);
     let mut match_kind = if hit.is_some() { Some("exact") } else { None };
     // 第二轮：通配，前缀最长者优先
     if hit.is_none() {
-        let mut wildcards: Vec<&(&Mapping, &crate::config::Provider)> = usable
+        let mut wildcards: Vec<&(&Mapping, &Provider, &ModelGroup)> = usable
             .iter()
-            .filter(|(mapping, _)| is_wildcard_pattern(&mapping.client_model) && match_mapping(mapping, client_model))
+            .filter(|(mapping, _, _)| is_wildcard_pattern(&mapping.client_model) && match_mapping(mapping, client_model))
             .collect();
         wildcards.sort_by(|a, b| b.0.client_model.len().cmp(&a.0.client_model.len()));
         hit = wildcards.first().copied();
@@ -96,11 +100,11 @@ pub fn resolve_routing(config: &AppConfig, protocol_id: &str, client_model: &str
     }
     // 第三轮：兜底
     if hit.is_none() {
-        hit = usable.iter().find(|(mapping, _)| mapping.client_model == "*");
+        hit = usable.iter().find(|(mapping, _, _)| mapping.client_model == "*");
         match_kind = if hit.is_some() { Some("fallback") } else { None };
     }
 
-    let Some((mapping, provider)) = hit else {
+    let Some((mapping, provider, group)) = hit else {
         let label = if client_model.is_empty() { "(空)" } else { client_model };
         return Err(RouteError {
             status: 404,
@@ -114,12 +118,12 @@ pub fn resolve_routing(config: &AppConfig, protocol_id: &str, client_model: &str
         protocol_name: protocol.name.clone(),
         provider_id: provider.id.clone(),
         provider_name: provider.name.clone(),
+        model_group_id: group.id.clone(),
         base_url: provider.base_url.clone(),
         token: provider.token.clone(),
-        api_format: provider.api_format.clone(),
+        api_format: mapping.upstream_protocol.clone(),
         mapping: (*mapping).clone(),
         match_kind: match_kind.unwrap_or("exact").to_string(),
         real_model: mapping.real_model.clone(),
     })
 }
-

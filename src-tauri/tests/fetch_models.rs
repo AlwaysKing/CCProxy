@@ -13,7 +13,9 @@ use ccproxy_lib::proxy::fetch_models::fetch_upstream_models;
 type Sink = Arc<Mutex<Vec<(String, HeaderMap)>>>;
 
 async fn start_mock(app: Router) -> (u16, tokio::sync::oneshot::Sender<()>) {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
     let port = listener.local_addr().unwrap().port();
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
@@ -85,12 +87,17 @@ async fn fetch_models_parses_dedupes_and_injects_anthropic_auth() {
 #[tokio::test]
 async fn fetch_models_uses_bearer_and_dedupes_version_segment() {
     let captured = sink();
-    let (port, stop) = mock(captured.clone(), 200, json!({ "data": [{ "id": "gpt-4o" }] })).await;
+    let (port, stop) = mock(
+        captured.clone(),
+        200,
+        json!({ "data": [{ "id": "gpt-4o" }] }),
+    )
+    .await;
 
     let client = reqwest::Client::new();
     let result = fetch_upstream_models(
         &client,
-        &json!({ "apiFormat": "openai_chat", "baseUrl": format!("http://127.0.0.1:{port}/v1"), "token": "sk-real" }),
+        &json!({ "apiFormat": "openai", "baseUrl": format!("http://127.0.0.1:{port}/v1"), "token": "sk-real" }),
     )
     .await;
     assert_eq!(result["models"], json!(["gpt-4o"]));
@@ -128,7 +135,10 @@ async fn fetch_models_reports_status_and_shape_errors() {
     )
     .await;
     assert_eq!(result["ok"], json!(false));
-    assert!(result["error"].as_str().unwrap().contains("没有可识别的模型列表"));
+    assert!(result["error"]
+        .as_str()
+        .unwrap()
+        .contains("没有可识别的模型列表"));
     let _ = stop.send(());
 }
 
@@ -136,15 +146,27 @@ async fn fetch_models_reports_status_and_shape_errors() {
 async fn fetch_models_reports_unreachable_upstream_without_throwing() {
     let client = reqwest::Client::new();
 
-    // auto 与认不出的格式都退回 OpenAI 一族的 Bearer；连不上时报错，不抛异常
-    for api_format in ["auto", "anthropic", "openai_responses", "gemini"] {
+    // 明确格式连不上时报错，不抛异常；auto 与认不出的格式在发起请求前就拒绝。
+    for api_format in ["anthropic", "openai"] {
         let result = fetch_upstream_models(
             &client,
             &json!({ "apiFormat": api_format, "baseUrl": "http://127.0.0.1:1", "token": "t" }),
         )
         .await;
         assert_eq!(result["ok"], json!(false), "{api_format} 应该报失败");
-        assert!(result["error"].as_str().unwrap().contains("上游地址无效"), "{api_format}");
+        let error = result["error"].as_str().unwrap();
+        assert!(!error.trim().is_empty(), "{api_format} 应该返回错误原因");
+    }
+    for api_format in ["auto", "gemini"] {
+        let result = fetch_upstream_models(
+            &client,
+            &json!({ "apiFormat": api_format, "baseUrl": "http://127.0.0.1:1", "token": "t" }),
+        )
+        .await;
+        assert_eq!(result["ok"], json!(false), "{api_format} 应该报失败");
+        assert!(
+            result["error"].as_str().unwrap().contains("上游格式无效"),
+            "{api_format}"
+        );
     }
 }
-

@@ -30,6 +30,13 @@ pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+// 登录自启的那条路，命令行里带着 autostart 插件注册的 --hidden（见 run()）。
+// 用它区分「开机自启」与「用户手动打开」：前者保持后台静默，后者照常亮出主界面。
+// 判断口径跟 auto-launch 在 macOS 上认的关键字一致，--minimized 一并兼容。
+fn is_hidden_launch(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--hidden" || arg == "--minimized")
+}
+
 fn bootstrap(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     logger::init("/tmp/ccproxy");
     logger::info("[App] 启动中", None);
@@ -106,13 +113,22 @@ fn bootstrap(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     tray::create(app.handle(), &state)?;
 
-    // 关窗口只隐藏，代理继续在后台服务
+    // 主窗口是按 visible:false 建的（自启拉起时不能先闪一下再隐藏），显示与否由启动来源决定：
+    // 开机自启只驻留托盘，手动打开才把界面亮出来。代理两种情况都照常在后台服务
     let main_window = app.get_webview_window("main");
+    let launched_hidden = is_hidden_launch(&std::env::args().collect::<Vec<String>>());
+    if launched_hidden {
+        // 复用关窗口那条路：隐藏窗口并把 macOS 激活策略降成 Accessory，Dock 里不留图标
+        tray::hide_window(app.handle());
+    } else {
+        tray::show_window(app.handle());
+    }
     logger::info(
         "[App] 窗口与托盘就绪",
         Some(&json!({
             "window": main_window.is_some(),
             "tray": app.tray_by_id("main").is_some(),
+            "launchedHidden": launched_hidden,
             "logPath": logger::path()
         })),
     );
@@ -146,15 +162,19 @@ pub fn run() {
     let builder = if std::env::var("CCPROXY_ALLOW_MULTI").as_deref() == Ok("1") {
         builder
     } else {
-        builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            tray::show_window(app);
+        builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // 手动再开一次才把已在后台跑的实例呼出来；自启拉起的那一路不该顶掉用户当前的屏幕
+            if !is_hidden_launch(&args) {
+                tray::show_window(app);
+            }
         }))
     };
     builder
         .plugin(tauri_plugin_dialog::init())
+        // 第二个参数会写进 LaunchAgent 的 ProgramArguments：登录自启时进程带 --hidden，bootstrap 据此保持后台
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec!["--hidden"]),
         ))
         .invoke_handler(tauri::generate_handler![
             commands::get_app_state,

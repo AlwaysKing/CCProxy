@@ -2,7 +2,9 @@
 
 use serde_json::{json, Value};
 
-use ccproxy_lib::config::{create_client_token, create_default_config, validate_config, ConfigManager, DEFAULT_PORT};
+use ccproxy_lib::config::{
+    create_client_token, create_default_config, validate_config, ConfigManager, DEFAULT_PORT,
+};
 
 use common::{config_from, TempDir};
 
@@ -27,7 +29,12 @@ fn first_run_returns_defaults() {
     assert!(result.first_run);
     assert!(!result.recovered);
     assert_eq!(result.config.settings.port, DEFAULT_PORT);
-    let ids: Vec<&str> = result.config.protocols.iter().map(|item| item.id.as_str()).collect();
+    let ids: Vec<&str> = result
+        .config
+        .protocols
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
     assert_eq!(ids, vec!["anthropic", "openai_chat", "openai_responses"]);
 }
 
@@ -42,19 +49,30 @@ fn saved_config_round_trips() {
             "mappings": [mapping("m1", "claude-*", "p_zhipu")]
         }]
     }));
-    manager.save(&serde_json::to_value(&config).unwrap()).unwrap();
+    manager
+        .save(&serde_json::to_value(&config).unwrap())
+        .unwrap();
 
     let reloaded = manager.load();
     assert_eq!(reloaded.config.providers[0].id, "p_zhipu");
-    // 老结构（供应商挂在协议下）迁移后按归属协议推断上游格式
-    assert_eq!(reloaded.config.providers[0].api_format, "anthropic");
-    assert_eq!(reloaded.config.protocols[0].mappings[0].client_model, "claude-*");
+    // 老结构（供应商挂在协议下）迁移后按归属协议生成模型组
+    assert_eq!(reloaded.config.providers[0].model_groups.len(), 1);
+    assert_eq!(
+        reloaded.config.providers[0].model_groups[0].api_format,
+        "anthropic"
+    );
+    assert_eq!(
+        reloaded.config.protocols[0].mappings[0].client_model,
+        "claude-*"
+    );
 }
 
 #[test]
 fn save_is_atomic_with_600_mode() {
     let dir = TempDir::new("ccproxy-cfg");
-    manager(&dir).save(&serde_json::to_value(create_default_config()).unwrap()).unwrap();
+    manager(&dir)
+        .save(&serde_json::to_value(create_default_config()).unwrap())
+        .unwrap();
     let names: Vec<String> = std::fs::read_dir(&dir.path)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
@@ -64,7 +82,11 @@ fn save_is_atomic_with_600_mode() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(dir.join("app.json")).unwrap().permissions().mode() & 0o777;
+        let mode = std::fs::metadata(dir.join("app.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600);
     }
 }
@@ -108,7 +130,11 @@ fn unknown_protocol_is_dropped_with_issue() {
         ]
     }));
     let config = result.config.unwrap();
-    let ids: Vec<&str> = config.protocols.iter().map(|item| item.id.as_str()).collect();
+    let ids: Vec<&str> = config
+        .protocols
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
     assert_eq!(ids, vec!["anthropic", "openai_chat", "openai_responses"]);
     assert!(result.issues.iter().any(|issue| issue.contains("gemini")));
 }
@@ -123,9 +149,17 @@ fn provider_without_base_url_and_mapping_without_provider_are_dropped() {
         }]
     }));
     let config = result.config.unwrap();
-    let providers: Vec<&str> = config.providers.iter().map(|item| item.id.as_str()).collect();
+    let providers: Vec<&str> = config
+        .providers
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
     assert_eq!(providers, vec!["ok"]);
-    let mappings: Vec<&str> = config.protocols[0].mappings.iter().map(|item| item.id.as_str()).collect();
+    let mappings: Vec<&str> = config.protocols[0]
+        .mappings
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
     assert_eq!(mappings, vec!["m1"]);
 }
 
@@ -154,7 +188,7 @@ fn model_entries_accept_old_and_new_shapes() {
             "mappings": []
         }]
     }));
-    let models = &result.config.unwrap().providers[0].models;
+    let models = &result.config.unwrap().providers[0].model_groups[0].models;
     let serialized: Value = serde_json::to_value(models).unwrap();
     assert_eq!(
         serialized,
@@ -163,6 +197,110 @@ fn model_entries_accept_old_and_new_shapes() {
             { "name": "gpt-5.5", "contextWindow": 400000, "maxContextWindow": 1024000, "inputModalities": ["text", "image"], "reasoning": true }
         ])
     );
+}
+
+#[test]
+fn v2_openai_provider_expands_to_groups_and_keeps_capabilities() {
+    let result = validate_config(&json!({
+        "version": 2,
+        "providers": [{
+            "id": "p1",
+            "name": "OpenAI",
+            "enabled": true,
+            "apiFormat": "auto",
+            "baseUrl": "http://openai",
+            "token": "sk-x",
+            "models": [{
+                "name": "gpt-5.5",
+                "contextWindow": 400000,
+                "inputModalities": ["text", "image"],
+                "reasoning": true
+            }]
+        }],
+        "protocols": [
+            {
+                "id": "openai_chat",
+                "enabled": true,
+                "mappings": [mapping("m_chat", "gpt-5*", "p1")]
+            },
+            {
+                "id": "openai_responses",
+                "enabled": true,
+                "mappings": [mapping("m_responses", "gpt-5*", "p1")]
+            }
+        ]
+    }));
+    let config = result.config.unwrap();
+    let provider = &config.providers[0];
+    let formats: Vec<&str> = provider
+        .model_groups
+        .iter()
+        .map(|group| group.api_format.as_str())
+        .collect();
+    assert_eq!(formats, vec!["openai"]);
+    for group in &provider.model_groups {
+        let serialized = serde_json::to_value(&group.models).unwrap();
+        assert_eq!(
+            serialized,
+            json!([{
+                "name": "gpt-5.5",
+                "contextWindow": 400000,
+                "inputModalities": ["text", "image"],
+                "reasoning": true
+            }])
+        );
+    }
+    assert_eq!(
+        config.protocols[1].mappings[0].model_group_id,
+        "g_openai"
+    );
+    assert_eq!(
+        config.protocols[2].mappings[0].model_group_id,
+        "g_openai"
+    );
+    assert_eq!(config.protocols[1].mappings[0].upstream_protocol, "openai_chat");
+    assert_eq!(config.protocols[2].mappings[0].upstream_protocol, "openai_responses");
+}
+
+#[test]
+fn mapping_keeps_an_explicit_model_group() {
+    let result = validate_config(&json!({
+        "providers": [{
+            "id": "p1",
+            "name": "共享供应商",
+            "enabled": true,
+            "baseUrl": "http://shared",
+            "token": "t",
+            "modelGroups": [
+                {
+                    "id": "g_chat",
+                    "apiFormat": "openai_chat",
+                    "models": [{ "name": "gpt-5.5" }]
+                },
+                {
+                    "id": "g_responses",
+                    "apiFormat": "openai_responses",
+                    "models": [{ "name": "gpt-5.5" }]
+                }
+            ]
+        }],
+        "protocols": [{
+            "id": "openai_responses",
+            "enabled": true,
+            "mappings": [{
+                "id": "m1",
+                "enabled": true,
+                "clientModel": "gpt-5.5",
+                "providerId": "p1",
+                "modelGroupId": "g_chat",
+                "upstreamProtocol": "openai_responses",
+                "realModel": "gpt-5.5"
+            }]
+        }]
+    }));
+    let mapping = &result.config.unwrap().protocols[2].mappings[0];
+    assert_eq!(mapping.model_group_id, "g_openai");
+    assert_eq!(mapping.upstream_protocol, "openai_responses");
 }
 
 #[test]
@@ -182,7 +320,7 @@ fn invalid_model_fields_drop_only_the_field() {
             "mappings": []
         }]
     }));
-    let models = &result.config.unwrap().providers[0].models;
+    let models = &result.config.unwrap().providers[0].model_groups[0].models;
     let serialized: Value = serde_json::to_value(models).unwrap();
     assert_eq!(
         serialized,
@@ -194,7 +332,15 @@ fn invalid_model_fields_drop_only_the_field() {
         ])
     );
     assert!(!result.issues.iter().any(|issue| issue.contains("nulled")));
-    for needle in ["contextWindow", "maxContextWindow", "inputModalities", "reasoning", "缺少 name", "非法模型条目", "重复模型 dup"] {
+    for needle in [
+        "contextWindow",
+        "maxContextWindow",
+        "inputModalities",
+        "reasoning",
+        "缺少 name",
+        "非法模型条目",
+        "重复模型 dup",
+    ] {
         assert!(
             result.issues.iter().any(|issue| issue.contains(needle)),
             "缺少 issue：{needle}（实际：{:?}）",
@@ -214,8 +360,12 @@ fn blank_windows_are_not_written_back_and_modalities_are_deduped() {
             "mappings": []
         }]
     }));
-    let serialized: Value = serde_json::to_value(&result.config.unwrap().providers[0].models).unwrap();
-    assert_eq!(serialized, json!([{ "name": "a", "inputModalities": ["text", "image"] }]));
+    let serialized: Value =
+        serde_json::to_value(&result.config.unwrap().providers[0].model_groups[0].models).unwrap();
+    assert_eq!(
+        serialized,
+        json!([{ "name": "a", "inputModalities": ["text", "image"] }])
+    );
 }
 
 #[test]
@@ -248,7 +398,10 @@ fn client_dirs_require_id_kind_absolute_path() {
 fn client_dirs_not_array_is_reset() {
     let broken = validate_config(&json!({ "settings": { "clientDirs": "nope" } }));
     assert!(broken.config.unwrap().settings.client_dirs.is_empty());
-    assert!(broken.issues.iter().any(|issue| issue.contains("clientDirs")));
+    assert!(broken
+        .issues
+        .iter()
+        .any(|issue| issue.contains("clientDirs")));
     let absent = validate_config(&json!({ "protocols": [] }));
     assert!(absent.config.unwrap().settings.client_dirs.is_empty());
 }
@@ -262,10 +415,15 @@ fn client_dirs_round_trip() {
         { "id": "d9", "kind": "codex", "path": "/Users/x/codex-config" }
     ]))
     .unwrap();
-    manager.save(&serde_json::to_value(&config).unwrap()).unwrap();
+    manager
+        .save(&serde_json::to_value(&config).unwrap())
+        .unwrap();
     let reloaded = manager.load();
     let dirs: Value = serde_json::to_value(&reloaded.config.settings.client_dirs).unwrap();
-    assert_eq!(dirs, json!([{ "id": "d9", "kind": "codex", "path": "/Users/x/codex-config" }]));
+    assert_eq!(
+        dirs,
+        json!([{ "id": "d9", "kind": "codex", "path": "/Users/x/codex-config" }])
+    );
 }
 
 #[test]
@@ -277,7 +435,14 @@ fn client_token_is_trimmed_and_invalid_values_become_empty() {
         let result = validate_config(&json!({ "settings": { "clientToken": bad } }));
         assert_eq!(result.config.unwrap().settings.client_token, "");
     }
-    assert_eq!(validate_config(&json!({})).config.unwrap().settings.client_token, "");
+    assert_eq!(
+        validate_config(&json!({}))
+            .config
+            .unwrap()
+            .settings
+            .client_token,
+        ""
+    );
 }
 
 #[test]
@@ -299,35 +464,65 @@ fn legacy_config_hoists_providers_and_splits_openai() {
     let config = result.config.unwrap();
 
     // OpenAI 拆成两条，原映射各复制一份
-    let ids: Vec<&str> = config.protocols.iter().map(|item| item.id.as_str()).collect();
+    let ids: Vec<&str> = config
+        .protocols
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
     assert_eq!(ids, vec!["anthropic", "openai_chat", "openai_responses"]);
     assert_eq!(config.protocols[1].mappings[0].client_model, "gpt-5*");
     assert_eq!(config.protocols[2].mappings[0].client_model, "gpt-5*");
 
     // 供应商升到顶层；格式按归属协议推断：Anthropic 那条明确，老的 openai 那条只能取 auto
-    let formats: Vec<(&str, &str)> = config
+    let formats: Vec<Vec<&str>> = config
         .providers
         .iter()
-        .map(|item| (item.id.as_str(), item.api_format.as_str()))
+        .map(|item| {
+            item.model_groups
+                .iter()
+                .map(|group| group.api_format.as_str())
+                .collect()
+        })
         .collect();
-    assert_eq!(formats, vec![("p_claude", "anthropic"), ("p_codex", "auto")]);
+    assert_eq!(
+        formats,
+        vec![vec!["anthropic"], vec!["openai"]]
+    );
+    assert_eq!(config.providers[1].model_groups.len(), 1);
 
     // 迁移要有交代，但不能把老的 openai 条目报成「不支持的协议」
-    assert!(result.issues.iter().any(|issue| issue.contains("供应商已升为全局")));
-    assert!(result.issues.iter().any(|issue| issue.contains("OpenAI 协议已拆成")));
-    assert!(!result.issues.iter().any(|issue| issue.contains("丢弃不支持的协议")));
+    assert!(result
+        .issues
+        .iter()
+        .any(|issue| issue.contains("供应商已升为全局")));
+    assert!(result
+        .issues
+        .iter()
+        .any(|issue| issue.contains("OpenAI 协议已拆成")));
+    assert!(!result
+        .issues
+        .iter()
+        .any(|issue| issue.contains("丢弃不支持的协议")));
 }
 
 #[test]
-fn unknown_api_format_falls_back_to_auto() {
+fn unknown_api_format_falls_back_to_legacy_openai_groups() {
     let result = validate_config(&json!({
         "providers": [
             { "id": "p1", "name": "p1", "baseUrl": "http://a", "apiFormat": "gemini", "models": ["m"] }
         ]
     }));
     let config = result.config.unwrap();
-    assert_eq!(config.providers[0].api_format, "auto");
-    assert!(result.issues.iter().any(|issue| issue.contains("apiFormat")));
+    let formats: Vec<&str> = config.providers[0]
+        .model_groups
+        .iter()
+        .map(|group| group.api_format.as_str())
+        .collect();
+    assert_eq!(formats, vec!["openai"]);
+    assert!(result
+        .issues
+        .iter()
+        .any(|issue| issue.contains("apiFormat")));
 }
 
 #[test]
@@ -341,10 +536,17 @@ fn new_shape_providers_are_read_from_the_top_level() {
     }));
     let config = result.config.unwrap();
     assert_eq!(config.providers.len(), 1);
-    assert_eq!(config.providers[0].api_format, "auto");
+    assert_eq!(config.providers[0].model_groups.len(), 1);
+    assert_eq!(
+        config.providers[0].model_groups[0].api_format,
+        "openai"
+    );
     assert_eq!(config.protocols[2].mappings.len(), 1);
     // 新结构下不该出现迁移提示
-    assert!(!result.issues.iter().any(|issue| issue.contains("已升为全局")));
+    assert!(!result
+        .issues
+        .iter()
+        .any(|issue| issue.contains("已升为全局")));
 }
 
 #[test]
@@ -377,13 +579,16 @@ fn colliding_provider_ids_are_split_and_mappings_follow() {
     assert_eq!(config.protocols[0].mappings[0].provider_id, "p1");
     assert_eq!(config.protocols[1].mappings[0].provider_id, "p1_2");
     assert_eq!(config.protocols[2].mappings[0].provider_id, "p1_2");
-    assert!(result.issues.iter().any(|issue| issue.contains("已拆成 p1_2")));
+    assert!(result
+        .issues
+        .iter()
+        .any(|issue| issue.contains("已拆成 p1_2")));
 }
 
 #[test]
 fn same_id_with_different_inferred_format_is_not_merged() {
-    // 地址与 token 一样，但一个在老 anthropic 协议下（推断成 anthropic 格式）、一个在老 openai
-    // 协议下（推断成 auto）。合并会让其中一侧从直通变成转换，属于静默的行为变化，所以照样拆开
+    // 地址与 token 一样，但一个在老 anthropic 协议下、一个在老 openai 协议下。
+    // 两个协议对应的模型组不同，不能合并成同一组。
     let result = validate_config(&json!({
         "protocols": [
             {
@@ -399,12 +604,20 @@ fn same_id_with_different_inferred_format_is_not_merged() {
         ]
     }));
     let config = result.config.unwrap();
-    let formats: Vec<(&str, &str)> = config
+    let formats: Vec<Vec<&str>> = config
         .providers
         .iter()
-        .map(|item| (item.id.as_str(), item.api_format.as_str()))
+        .map(|item| {
+            item.model_groups
+                .iter()
+                .map(|group| group.api_format.as_str())
+                .collect()
+        })
         .collect();
-    assert_eq!(formats, vec![("p1", "anthropic"), ("p1_2", "auto")]);
+    assert_eq!(
+        formats,
+        vec![vec!["anthropic"], vec!["openai"]]
+    );
 }
 
 #[test]
@@ -422,7 +635,10 @@ fn legacy_entry_fills_the_empty_slot_and_is_otherwise_ignored() {
     assert_eq!(config.protocols[1].mappings[0].client_model, "gpt-4*");
     // responses 那条没有自己的条目，从老的 openai 条目补上（总比空着强）
     assert_eq!(config.protocols[2].mappings[0].client_model, "legacy-*");
-    assert!(result.issues.iter().any(|issue| issue.contains("老条目及其映射已被忽略")));
+    assert!(result
+        .issues
+        .iter()
+        .any(|issue| issue.contains("老条目及其映射已被忽略")));
 }
 
 #[test]
@@ -452,21 +668,148 @@ fn loading_a_legacy_file_backs_it_up_and_writes_the_new_shape() {
         .any(|issue| issue.contains("已把旧版配置升级为新结构")));
 
     // 原文件原样留了一份备份，用户手上还有能照着改回去的旧结构
-    assert_eq!(std::fs::read_to_string(dir.join("app.json.v1.bak")).unwrap(), legacy_text);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("app.json.v1.bak")).unwrap(),
+        legacy_text
+    );
 
-    // 落盘的是新结构：供应商在顶层、协议下没有 providers、版本号 2，其余设置原样保留
-    let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
-    assert_eq!(saved["version"], json!(2));
-    assert_eq!(saved["providers"][0]["apiFormat"], json!("anthropic"));
+    // 落盘的是新结构：供应商在顶层、协议下没有 providers、版本号 3，其余设置原样保留
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
+    assert_eq!(saved["version"], json!(4));
+    assert_eq!(
+        saved["providers"][0]["modelGroups"][0]["apiFormat"],
+        json!("anthropic")
+    );
     assert!(saved["protocols"][0].get("providers").is_none());
     assert_eq!(saved["settings"]["port"], json!(19000));
     assert_eq!(saved["settings"]["clientToken"], json!("sk-token"));
 
     // 再读一次不再触发升级（幂等），内容也不变
     let again = manager.load();
-    assert!(!again.issues.iter().any(|issue| issue.contains("升级为新结构")));
+    assert!(!again
+        .issues
+        .iter()
+        .any(|issue| issue.contains("升级为新结构")));
     assert_eq!(again.config.providers.len(), 1);
     assert_eq!(again.config.protocols[0].mappings.len(), 1);
+}
+
+#[test]
+fn loading_a_v2_file_backs_up_and_expands_models_without_losing_abilities() {
+    let dir = TempDir::new("ccproxy-cfg");
+    let manager = manager(&dir);
+    let legacy = json!({
+        "version": 2,
+        "settings": { "port": 19000 },
+        "providers": [{
+            "id": "p_openai",
+            "name": "OpenAI",
+            "enabled": true,
+            "apiFormat": "auto",
+            "baseUrl": "https://openai.example.com/v1",
+            "token": "sk-x",
+            "models": [{
+                "name": "gpt-5.5",
+                "contextWindow": 400000,
+                "maxContextWindow": 1024000,
+                "inputModalities": ["text", "image"],
+                "reasoning": true
+            }]
+        }],
+        "protocols": [
+            {
+                "id": "openai_chat",
+                "enabled": true,
+                "mappings": [mapping("m_chat", "gpt-5*", "p_openai")]
+            },
+            {
+                "id": "openai_responses",
+                "enabled": true,
+                "mappings": [mapping("m_responses", "gpt-5*", "p_openai")]
+            }
+        ]
+    });
+    let legacy_text = serde_json::to_string_pretty(&legacy).unwrap();
+    dir.write("app.json", &legacy_text);
+
+    let loaded = manager.load();
+    assert!(!loaded.recovered);
+    assert_eq!(loaded.config.providers[0].model_groups.len(), 1);
+    for group in &loaded.config.providers[0].model_groups {
+        assert_eq!(group.models[0].context_window, Some(400000));
+        assert_eq!(group.models[0].reasoning, Some(true));
+    }
+    assert_eq!(std::fs::read_to_string(dir.join("app.json.v2.bak")).unwrap(), legacy_text);
+
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
+    assert_eq!(saved["version"], json!(4));
+    assert_eq!(saved["providers"][0]["modelGroups"].as_array().unwrap().len(), 1);
+    assert!(saved["providers"][0].get("apiFormat").is_none());
+}
+
+#[test]
+fn loading_intermediate_v3_promotes_group_address_and_token() {
+    let dir = TempDir::new("ccproxy-cfg");
+    let manager = manager(&dir);
+    let intermediate = json!({
+        "version": 3,
+        "settings": { "port": 19000 },
+        "providers": [{
+            "id": "p1",
+            "name": "共享供应商",
+            "enabled": true,
+            "modelGroups": [
+                {
+                    "id": "g_chat",
+                    "apiFormat": "openai_chat",
+                    "baseUrl": "https://shared.example.com/v1",
+                    "token": "sk-shared",
+                    "models": [{ "name": "gpt-5.5", "contextWindow": 400000 }]
+                },
+                {
+                    "id": "g_responses",
+                    "apiFormat": "openai_responses",
+                    "baseUrl": "https://shared.example.com/v1",
+                    "token": "sk-shared",
+                    "models": [{ "name": "gpt-5.6", "reasoning": true }]
+                }
+            ]
+        }],
+        "protocols": [{
+            "id": "openai_responses",
+            "enabled": true,
+            "mappings": [{
+                "id": "m1",
+                "enabled": true,
+                "clientModel": "gpt-5.5",
+                "providerId": "p1",
+                "modelGroupId": "g_responses",
+                "realModel": "gpt-5.5"
+            }]
+        }]
+    });
+    let original = serde_json::to_string_pretty(&intermediate).unwrap();
+    dir.write("app.json", &original);
+
+    let loaded = manager.load();
+    assert!(!loaded.recovered);
+    assert_eq!(loaded.config.providers[0].base_url, "https://shared.example.com/v1");
+    assert_eq!(loaded.config.providers[0].token, "sk-shared");
+    assert_eq!(loaded.config.providers[0].model_groups.len(), 1);
+    assert_eq!(loaded.config.providers[0].model_groups[0].api_format, "openai");
+    assert_eq!(loaded.config.providers[0].model_groups[0].models.len(), 2);
+    assert_eq!(loaded.config.providers[0].model_groups[0].models[0].context_window, Some(400000));
+    assert_eq!(loaded.config.providers[0].model_groups[0].models[1].reasoning, Some(true));
+    assert_eq!(loaded.config.protocols[2].mappings[0].model_group_id, "g_openai");
+    assert_eq!(loaded.config.protocols[2].mappings[0].upstream_protocol, "openai_responses");
+    assert_eq!(std::fs::read_to_string(dir.join("app.json.v3.bak")).unwrap(), original);
+
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
+    assert_eq!(saved["providers"][0]["baseUrl"], json!("https://shared.example.com/v1"));
+    assert_eq!(saved["providers"][0]["token"], json!("sk-shared"));
+    assert!(saved["providers"][0]["modelGroups"][0].get("baseUrl").is_none());
+    assert!(saved["providers"][0]["modelGroups"][0].get("token").is_none());
 }
 
 #[test]
@@ -477,7 +820,11 @@ fn protocol_names_come_from_the_presets() {
         "protocols": [{ "id": "openai", "name": "OpenAI", "enabled": true, "providers": [], "mappings": [] }]
     }));
     let config = result.config.unwrap();
-    let names: Vec<&str> = config.protocols.iter().map(|item| item.name.as_str()).collect();
+    let names: Vec<&str> = config
+        .protocols
+        .iter()
+        .map(|item| item.name.as_str())
+        .collect();
     assert_eq!(names, vec!["Anthropic", "OpenAI Chat", "OpenAI Responses"]);
 
     // 手改过的名字也不采纳：协议名是预设，不是配置项
@@ -499,10 +846,17 @@ fn nested_providers_are_ignored_when_the_top_level_pool_exists() {
     }));
     let config = result.config.unwrap();
     // 顶层池是唯一真源：协议下那份老数据不会被提升回来，否则等于把已经删掉的供应商救活
-    let ids: Vec<&str> = config.providers.iter().map(|item| item.id.as_str()).collect();
+    let ids: Vec<&str> = config
+        .providers
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
     assert_eq!(ids, vec!["p_new"]);
     assert_eq!(config.protocols[0].mappings.len(), 1);
-    assert!(result.issues.iter().any(|issue| issue.contains("以顶层为准")));
+    assert!(result
+        .issues
+        .iter()
+        .any(|issue| issue.contains("以顶层为准")));
 }
 
 #[test]
@@ -542,9 +896,10 @@ fn log_and_usage_switches_default_to_on() {
     assert!(absent.settings.logs_enabled);
     assert!(absent.settings.usage_enabled);
 
-    let off = validate_config(&json!({ "settings": { "logsEnabled": false, "usageEnabled": false } }))
-        .config
-        .unwrap();
+    let off =
+        validate_config(&json!({ "settings": { "logsEnabled": false, "usageEnabled": false } }))
+            .config
+            .unwrap();
     assert!(!off.settings.logs_enabled);
     assert!(!off.settings.usage_enabled);
 
@@ -555,4 +910,3 @@ fn log_and_usage_switches_default_to_on() {
     assert!(weird.settings.logs_enabled);
     assert!(weird.settings.usage_enabled);
 }
-

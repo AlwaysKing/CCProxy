@@ -78,7 +78,7 @@ pub struct ExpectedEntry {
 }
 
 // OpenAI 协议下「该出现在清单里」的条目：启用的映射（clientModel 不含 *——通配和兜底
-// 是路由规则不是模型），名字用 clientModel，能力取映射指向的那个真实模型的配置
+// 是路由规则不是模型），名字用 clientModel，能力取映射所属模型组里的真实模型配置
 // providers 是配置顶层的全局供应商池：映射只存 providerId，供应商本体不再挂在协议下面
 pub fn expected_catalog_entries(protocol: Option<&Protocol>, providers: &[Provider]) -> Vec<ExpectedEntry> {
     // 协议整体停用时代理根本不服务它，清单一条都不归我们管
@@ -102,11 +102,13 @@ pub fn expected_catalog_entries(protocol: Option<&Protocol>, providers: &[Provid
         if entries.iter().any(|entry| entry.name == mapping.client_model) {
             continue;
         }
-        let Some(provider) = providers.iter().find(|item| item.id == mapping.provider_id && item.enabled)
-        else {
+        let Some(provider) = providers.iter().find(|item| item.id == mapping.provider_id && item.enabled) else {
             continue;
         };
-        let model = provider.models.iter().find(|item| item.name == mapping.real_model);
+        let Some(group) = provider.model_groups.iter().find(|item| item.id == mapping.model_group_id) else {
+            continue;
+        };
+        let model = group.models.iter().find(|item| item.name == mapping.real_model);
         entries.push(ExpectedEntry {
             name: mapping.client_model.clone(),
             context_window: model.and_then(|item| item.context_window),
@@ -493,4 +495,3 @@ pub fn rewrite_catalog(json_text: &str, expected: &[ExpectedEntry]) -> Result<Js
 
     finish(&text, edits)
 }
-

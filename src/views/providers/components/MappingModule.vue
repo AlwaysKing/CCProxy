@@ -3,15 +3,24 @@
 // 精确 > 通配 > 兜底 * 的优先级由主进程 router 决定，这里只把规则摊开给用户看并允许增删改启停。
 import { computed, ref } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
-import { Badge, BaseButton, ConfirmDialog, EmptyState, IconButton, ModuleCard, Toggle } from '@/components/base'
+import { Badge, BaseButton, BaseTabs, ConfirmDialog, EmptyState, IconButton, ModuleCard, Toggle } from '@/components/base'
 import MappingDialog from './dialogs/MappingDialog.vue'
 
 const props = defineProps({
   protocol: {
     type: Object,
     required: true
+  },
+  protocolId: {
+    type: String,
+    default: null
+  },
+  protocolTabs: {
+    type: Array,
+    default: () => []
   }
 })
+const emit = defineEmits(['update:protocolId'])
 
 const configStore = useConfigStore()
 
@@ -19,6 +28,10 @@ const dialogVisible = ref(false)
 const editingMapping = ref(null)
 const deletingMapping = ref(null)
 const notice = ref('')
+const protocolTabValue = computed({
+  get: () => props.protocolId,
+  set: (value) => emit('update:protocolId', value)
+})
 
 // 没有供应商时映射没有目标可指，先挡在入口。供应商是全局池，所有协议共用同一份
 const canAdd = computed(() => configStore.providers.length > 0)
@@ -39,6 +52,13 @@ const rows = computed(() =>
 
 function providerName(providerId) {
   return configStore.providers.find((item) => item.id === providerId)?.name || '（供应商已删除）'
+}
+
+function upstreamName(protocol) {
+  if (protocol === 'anthropic') return 'Claude / Anthropic'
+  if (protocol === 'openai_chat') return 'OpenAI Chat'
+  if (protocol === 'openai_responses') return 'OpenAI Responses'
+  return '（上游协议已失效）'
 }
 
 function onAdd() {
@@ -76,17 +96,21 @@ async function onConfirmDelete() {
     <template #desc>
       把客户端发来的模型名换成本协议下某个供应商的真实模型；匹配顺序为精确 &gt; 通配 &gt; 兜底 <code>*</code>。
     </template>
-    <!-- 添加按钮只挂在标题右侧这一处，空态里不再放第二个：同一个动作两个位置各有一个，
-         而且空态比一行数据高，卡片高度会在「空 / 有内容」之间跳 -->
-    <template #action>
-      <BaseButton size="sm" @click="onAdd">+ 添加映射</BaseButton>
-    </template>
+      <!-- 添加按钮只挂在标题右侧这一处，空态里不再放第二个：同一个动作两个位置各有一个，
+           而且空态比一行数据高，卡片高度会在「空 / 有内容」之间跳 -->
+      <template #action>
+        <div class="mapping-head-actions">
+          <BaseTabs v-model="protocolTabValue" :items="protocolTabs" size="sm" />
+          <BaseButton size="sm" @click="onAdd">+ 添加映射</BaseButton>
+        </div>
+      </template>
 
     <table v-if="protocol.mappings.length" class="data-table">
       <thead>
         <tr>
           <th>映射模型</th>
           <th>供应商</th>
+          <th>上游协议</th>
           <th>原始模型</th>
           <th class="col-toggle">启停</th>
           <th class="col-actions">操作</th>
@@ -102,6 +126,9 @@ async function onConfirmDelete() {
           </td>
           <td>
             <span class="cell-provider">{{ providerName(row.mapping.providerId) }}</span>
+          </td>
+          <td>
+            <Badge variant="default" size="sm">{{ upstreamName(row.mapping.upstreamProtocol) }}</Badge>
           </td>
           <td>
             <code class="cell-real">{{ row.mapping.realModel }}</code>
@@ -168,6 +195,12 @@ async function onConfirmDelete() {
    表格在卡片里，自己不再铺底色和圆角，否则两块灰会叠在一起 */
 .row-off {
   opacity: 0.5;
+}
+
+.mapping-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
 }
 
 .cell-model {

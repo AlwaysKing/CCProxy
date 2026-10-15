@@ -352,6 +352,7 @@ onMounted(() => {
 <style scoped>
 .settings-page {
   flex: 1;
+  min-height: 0;
   padding: var(--spacing-xl);
   display: flex;
   flex-direction: column;

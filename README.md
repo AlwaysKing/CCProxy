@@ -2,7 +2,7 @@
 
 本地单端口 AI agent 协议代理。识别进来的请求属于哪种线格式（Anthropic Messages /
 OpenAI Chat / OpenAI Responses），按该协议的映射表把客户端模型名换成真实供应商 +
-真实模型名 + 真实 token，再按**供应商声明的上游格式**转换协议、转发上游，
+真实模型名 + 真实 token，再按**映射所属模型组的上游格式**转换协议、转发上游，
 把响应转回客户端要的形状。界面仿 CC Switch。技术栈：Tauri v2 + Rust（壳与后端）＋
 Vue 3 + Vite（界面）。
 
@@ -13,12 +13,11 @@ Kimi……），传统做法是改客户端的 base_url 与 key——每个客�
 CCProxy 把这些收在一处：
 
 - 客户端只填 `http://127.0.0.1:18888` 和一个假 token，真实凭据不进客户端配置
-- 三件事都在界面里配，改完即时生效：供应商（上游地址 + token + 上游格式 + 模型列表）、
-  协议 → 映射表（clientModel → 供应商 + realModel）、上游格式决定要不要转换
-- **协议互转**：客户端说 Anthropic、供应商只认 OpenAI Chat 也能通。供应商的「上游格式」
-  选 auto 表示不做转换（跟随客户端，直通）；选具体格式时代理改写端点、按上游格式注入认证、
-  请求与响应（含 SSE 流式）都在中间转一道
-- 供应商是全局池：同一家上游配一次，三个协议的映射表共用一个端点，不用每个协议各录一遍
+- 三件事都在界面里配，改完即时生效：供应商（共用地址、token，模型分 Claude / OpenAI 两类）、
+  协议 → 映射表（clientModel → 供应商 + 上游协议 + realModel）、客户端与上游协议决定要不要转换
+- **协议互转**：客户端说 Anthropic、供应商只认 OpenAI 也能通。模型列表只分
+  Claude / OpenAI；每条映射明确选择 Anthropic、OpenAI Chat 或 OpenAI Responses 上游协议
+- 供应商是全局池：同一家上游配一次，地址与 token 共用，三个协议的映射表按供应商 + 模型组引用
 - 请求日志与用量统计分两页：tokens 按天 / 协议 / 供应商 / 模型聚合
 - codex 的 `models.json` 模型清单跟着映射表自动刷新，不用手工维护；codex 的 app-server daemon
   只在启动时读一次 `config.toml` 与模型清单，改完设置页会提醒执行 `codex app-server daemon restart`
@@ -63,4 +62,3 @@ npm run tauri:build    # 打包 .app / .dmg（产物在 src-tauri/target/release
 
 - [设计文档](docs/superpowers/specs/2026-09-21-ccproxy-design.md)：协议识别、映射查表、转发管线、错误处理的口径
 - [Electron → Tauri 迁移记录](docs/2026-10-14-electron-to-tauri.md)：模块对应、IPC 对应、行为差异、分发与 CI 注意事项
-

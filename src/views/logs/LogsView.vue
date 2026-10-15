@@ -263,6 +263,7 @@ onUnmounted(() => {
 <style scoped>
 .logs-page {
   flex: 1;
+  min-height: 0;
   padding: var(--spacing-xl);
   display: flex;
   flex-direction: column;

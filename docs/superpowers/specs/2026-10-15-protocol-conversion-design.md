@@ -3,6 +3,11 @@
 日期：2026-10-15
 状态：已实施（2026-10-15）。方案 A 复用 + openai 拆分 + 供应商升为全局池
 
+> 后续调整：供应商仍保持全局池，但供应商级 `apiFormat` 已被模型组取代。每个供应商下按
+> `anthropic` / `openai` 分成模型组；供应商共用地址与 token，映射明确引用 `modelGroupId`，
+> 并记录具体的 `upstreamProtocol`。本文下面的“供应商声明上游格式”描述的是 v2
+> 实施时状态，v3 迁移与当前界面以实际代码为准。
+
 ## 一句话
 
 让客户端用自己协议的线格式发请求（Anthropic Messages / OpenAI Chat / OpenAI Responses），

@@ -4,8 +4,7 @@
 // 未命中的路径直接按未知协议报错，文案见 unknown_path_message。
 // 请求体解析（转发链取 clientModel 用）也放在这里。
 //
-// 返回的 id 与 SUPPORTED_PROTOCOLS / API_FORMATS 里的取值同一套：
-// 客户端线格式有几种，协议条目就有几条。
+// 返回的 id 与 SUPPORTED_PROTOCOLS 里的取值同一套：客户端线格式有几种，协议条目就有几条。
 
 use serde_json::Value;
 

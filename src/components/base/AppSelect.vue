@@ -67,13 +67,24 @@ function updatePosition() {
   const normalizedMenuMinWidth = Number.isFinite(Number(props.menuMinWidth))
     ? `${Number(props.menuMinWidth)}px`
     : String(props.menuMinWidth || '').trim()
+  const viewportPadding = 8
+  const menuGap = 6
+  const estimatedMenuHeight = Math.min(280, Math.max(48, flatOptions.value.length * 38 + 12))
+  const spaceBelow = window.innerHeight - rect.bottom - menuGap - viewportPadding
+  const spaceAbove = rect.top - menuGap - viewportPadding
+  const openUp = spaceBelow < estimatedMenuHeight && spaceAbove > spaceBelow
+  const maxHeight = Math.max(80, Math.min(280, openUp ? spaceAbove : spaceBelow))
+  const menuWidth = Math.max(rect.width, Number.parseInt(normalizedMenuMinWidth, 10) || rect.width)
+  const left = Math.min(Math.max(viewportPadding, rect.left), window.innerWidth - menuWidth - viewportPadding)
 
   menuStyle.value = {
     position: 'fixed',
-    top: `${rect.bottom + 6}px`,
-    left: `${rect.left}px`,
+    top: openUp ? 'auto' : `${rect.bottom + menuGap}px`,
+    bottom: openUp ? `${window.innerHeight - rect.top + menuGap}px` : 'auto',
+    left: `${Math.max(viewportPadding, left)}px`,
     width: `${rect.width}px`,
     minWidth: normalizedMenuMinWidth || `${rect.width}px`,
+    maxHeight: `${maxHeight}px`,
     zIndex: 9999
   }
 }

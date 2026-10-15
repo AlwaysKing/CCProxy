@@ -13,6 +13,7 @@ body,
 #app {
   height: 100%;
   margin: 0;
+  overflow: hidden;
 }
 
 /* 画布色在这里硬编码，不用 --bg-primary：那个变量是「抬起来的面板」（弹窗、卡片）的颜色，
@@ -25,10 +26,6 @@ body {
   font-size: var(--font-size-md);
   line-height: var(--line-height-normal);
   -webkit-font-smoothing: antialiased;
-}
-
-#app {
-  overflow: hidden;
 }
 
 /* 桌面应用的正文不该拖蓝选中（鼠标划过按钮、行、表格都会留下一片蓝）。

@@ -413,12 +413,8 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
         }
     };
 
-    // 上游格式：auto 表示跟随客户端。认证方式、端点改写与要不要转换都按它决定
-    let upstream_format = if route.api_format.is_empty() || route.api_format == "auto" {
-        protocol_id.to_string()
-    } else {
-        route.api_format.clone()
-    };
+    // 上游格式由映射所属模型组明确给出；认证方式、端点改写与要不要转换都按它决定。
+    let upstream_format = route.api_format.clone();
     let Ok(adapter) = get_adapter(&upstream_format) else {
         return json_response(
             500,
@@ -867,5 +863,4 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
     }
     builder.body(Body::from(out)).unwrap_or_else(|_| Response::new(Body::empty()))
 }
-
 

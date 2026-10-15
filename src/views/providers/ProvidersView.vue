@@ -1,6 +1,6 @@
 <script setup>
-// 供应商主页：按当前协议分两块——映射模块（客户模型名 → 供应商 / 真实模型）与代理商模块（供应商卡片）。
-// 协议由顶栏 Tab 决定，本组件只负责把协议分发给两个模块，状态各自管各自的。
+// 供应商主页：按当前客户端协议分两块——映射模块与代理商模块。
+// 协议切换位于映射模块标题行，本组件只负责把选中协议分发给映射模块。
 import { computed } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
 import { EmptyState } from '@/components/base'
@@ -13,10 +13,12 @@ const props = defineProps({
     default: null
   }
 })
+const emit = defineEmits(['update:protocolId'])
 
 const configStore = useConfigStore()
 
 const protocol = computed(() => configStore.protocols.find((item) => item.id === props.protocolId) || null)
+const protocolTabs = computed(() => configStore.protocols.map((item) => ({ value: item.id, label: item.name })))
 </script>
 
 <template>
@@ -24,7 +26,13 @@ const protocol = computed(() => configStore.protocols.find((item) => item.id ===
     <!-- 切协议要换实例：模块自己攒着 notice（切换/删除失败的原因），沿用同一个实例会把上一个协议的
          报错显示在新协议上。两块必须各用自己的 key，同一组兄弟节点里 key 撞车会被 Vue 报警 -->
     <template v-if="protocol">
-      <MappingModule :key="`mapping-${protocol.id}`" :protocol="protocol" />
+      <MappingModule
+        :key="`mapping-${protocol.id}`"
+        :protocol="protocol"
+        :protocol-id="protocolId"
+        :protocol-tabs="protocolTabs"
+        @update:protocol-id="emit('update:protocolId', $event)"
+      />
       <!-- 供应商是全局池，不随协议 Tab 切换，所以不带 key、也不传协议 -->
       <ProviderModule />
     </template>
@@ -49,6 +57,7 @@ const protocol = computed(() => configStore.protocols.find((item) => item.id ===
 <style scoped>
 .providers-page {
   flex: 1;
+  min-height: 0;
   /* 页面内边距和顶栏的右内边距同档，卡片右边线和顶栏右端对得齐；两块之间不用留太大，
      卡片自己有边框，留 16 就够分开 */
   padding: var(--spacing-xl);
