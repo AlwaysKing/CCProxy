@@ -122,7 +122,7 @@ const STORAGE_ROWS = computed(() => [
     name: '请求日志',
     settingKey: 'logsEnabled',
     enabled: logsEnabled.value,
-    desc: '每个请求的完整记录（含识别打分、错误详情），按天分文件',
+    desc: '每个请求的完整记录（含错误详情），按天分文件',
     files: stats.value?.logs?.files ?? 0,
     bytes: stats.value?.logs?.bytes ?? 0
   },

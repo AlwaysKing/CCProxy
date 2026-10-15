@@ -38,8 +38,7 @@ fn forwarded(fields: Value) -> Value {
         "errorCode": null,
         "error": null,
         "cancelled": false,
-        "tokens": { "input": 100, "output": 20 },
-        "detection": null
+        "tokens": { "input": 100, "output": 20 }
     });
     if let (Some(target), Some(source)) = (base.as_object_mut(), fields.as_object()) {
         for (key, value) in source {

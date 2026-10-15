@@ -379,23 +379,30 @@ async fn end_to_end_mapping_miss_is_404() {
 }
 
 #[tokio::test]
-async fn end_to_end_undetectable_request_is_400_with_scores() {
+async fn end_to_end_unknown_path_is_400() {
     let dir = TempDir::new("ccproxy-e2e");
     let state = test_state(config_with_port(anthropic_config(1, "claude-*"), 0), &dir);
     let port = start_proxy(&state).await;
 
+    // 带齐 Anthropic 的头与请求体特征：协议只看路径，这些特征救不回一条不认识的路径
     let response = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/foo"))
         .header("content-type", "application/json")
-        .body("{}")
+        .header("anthropic-version", "2023-06-01")
+        .header("x-api-key", "sk-fake")
+        .body(claude_body("claude-sonnet-4-20250514", false))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), 400);
     let payload: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
     assert_eq!(payload["error"]["type"], json!("ccproxy_detect"));
-    assert_eq!(payload["error"]["detail"]["scores"]["anthropic"], json!(0));
-    assert_eq!(payload["error"]["detail"]["scores"]["openai"], json!(0));
+    // 文案要把认识的路径列出来，用户照着改 baseURL 就能通
+    let message = payload["error"]["message"].as_str().unwrap();
+    assert!(message.contains("/foo"));
+    assert!(message.contains("/v1/messages"));
+    assert!(message.contains("/v1/responses"));
+    assert!(payload["error"].get("detail").is_none());
 
     state.proxy.stop().await;
 }

@@ -13,7 +13,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 
 use crate::proxy::adapters::{get_adapter, strip_inbound_credentials, ResponseRewriter};
-use crate::proxy::detector::{detect_protocol, parse_body};
+use crate::proxy::detector::{detect_protocol, parse_body, unknown_path_message};
 use crate::proxy::models::{build_models_response, match_models_request, resolve_client_protocol};
 use crate::proxy::router::{resolve_routing, Route};
 use crate::proxy::upstream::{
@@ -49,7 +49,6 @@ struct LogFields {
     error: Option<String>,
     cancelled: bool,
     tokens: Option<Value>,
-    detection: Option<Value>,
 }
 
 // 统一日志 entry：五个分支（模型列表 / 收体失败 / 识别失败 / 查表失败 / 正常转发）字段必须一致，
@@ -74,8 +73,7 @@ fn make_log_entry(id: &str, started_at: i64, method: &str, path: &str, fields: L
         "errorCode": fields.error_code,
         "error": fields.error,
         "cancelled": fields.cancelled,
-        "tokens": fields.tokens,
-        "detection": fields.detection
+        "tokens": fields.tokens
     })
 }
 
@@ -324,12 +322,9 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
         return json_response(status, &payload);
     }
 
-    let detection = detect_protocol(&path, &headers, &body);
-    let detection_json = json!({
-        "scores": { "anthropic": detection.scores.anthropic, "openai": detection.scores.openai },
-        "reasons": detection.reasons
-    });
-    let Some(protocol_id) = detection.protocol.clone() else {
+    // 协议由请求路径决定；认不出的路径直接 400，文案里列出代理认识的路径让人照着改 baseURL
+    let Some(protocol_id) = detect_protocol(&path) else {
+        let message = unknown_path_message(&path);
         let entry = make_log_entry(
             &id,
             started_at,
@@ -338,21 +333,13 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
             LogFields {
                 status_code: 400,
                 outcome: "detect_failed".to_string(),
-                detection: Some(detection_json.clone()),
+                error_code: Some("unknown_path".to_string()),
+                error: Some(message.clone()),
                 ..Default::default()
             },
         );
         emit_log(&state, &entry);
-        return json_response(
-            400,
-            &json!({
-                "error": {
-                    "type": "ccproxy_detect",
-                    "message": "无法识别请求所属协议",
-                    "detail": detection_json
-                }
-            }),
-        );
+        return json_response(400, &json!({ "error": { "type": "ccproxy_detect", "message": message } }));
     };
 
     let payload = parse_body(&body);
@@ -376,7 +363,7 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
         let Ok(config) = state.config.read() else {
             return json_response(500, &json!({ "error": { "type": "ccproxy_internal", "message": "配置不可读" } }));
         };
-        resolve_routing(&config, &protocol_id, &client_model)
+        resolve_routing(&config, protocol_id, &client_model)
     };
     let route: Route = match routing {
         Ok(route) => route,
@@ -387,12 +374,11 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
                 method.as_str(),
                 &path,
                 LogFields {
-                    protocol: Some(protocol_id),
+                    protocol: Some(protocol_id.to_string()),
                     client_model: Some(client_model),
                     status_code: error.status,
                     outcome: "rejected".to_string(),
                     error_code: Some(error.code.clone()),
-                    detection: Some(detection_json),
                     ..Default::default()
                 },
             );
@@ -438,7 +424,6 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
         let id = id.clone();
         let method = method.as_str().to_string();
         let path = path.clone();
-        let protocol_id = protocol_id.clone();
         let client_model = client_model.clone();
         let route = (
             route.match_kind.clone(),
@@ -455,7 +440,7 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
                 &method,
                 &path,
                 LogFields {
-                    protocol: Some(protocol_id.clone()),
+                    protocol: Some(protocol_id.to_string()),
                     client_model: Some(client_model.clone()),
                     match_kind: Some(route.0.clone()),
                     matched_rule: Some(route.1.clone()),
@@ -469,7 +454,6 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
                     error: outcome.error,
                     cancelled: outcome.cancelled,
                     tokens,
-                    detection: Some(detection_json.clone()),
                 },
             );
             emit_log(&state, &entry);

@@ -1,6 +1,6 @@
 // 模型列表接口接管：GET /v1/models 与 GET /v1/models/{id} 不透传上游，
 // 由代理按当前激活的映射表直接生成响应，客户端看到的就是本代理实际可路由的模型名。
-// 两个协议的该路径完全相同，打分制会平局，改按请求头判定客户端类型：
+// 这条路径两个协议完全相同，光看路径分不出客户端是哪一类，只能按请求头判定：
 // 带 anthropic-version 或 x-api-key 视为 Anthropic 客户端，否则按 OpenAI 处理。
 
 use axum::http::HeaderMap;

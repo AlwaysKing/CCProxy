@@ -238,20 +238,6 @@ onUnmounted(() => {
           <span class="detail-label">{{ row.label }}</span>
           <span class="detail-value" :class="{ mono: row.mono }">{{ row.value }}</span>
         </div>
-
-        <!-- 识别打分按条列出来：协议识别是打分校出来的，只看结论没法解释「为什么判成了 OpenAI」 -->
-        <div v-if="detail.detection" class="detail-detection">
-          <span class="detail-label">协议识别</span>
-          <div class="detection-body">
-            <ul class="score-list">
-              <li v-for="(reason, index) in detail.detection.reasons" :key="index">{{ reason }}</li>
-              <li v-if="!detail.detection.reasons.length">没有任何识别特征命中</li>
-            </ul>
-            <p class="score-total">
-              Anthropic {{ detail.detection.scores.anthropic }} 分 · OpenAI {{ detail.detection.scores.openai }} 分
-            </p>
-          </div>
-        </div>
       </div>
     </BaseDialog>
 
@@ -386,35 +372,6 @@ onUnmounted(() => {
 
 .detail-value.mono {
   font-family: var(--font-family-mono);
-}
-
-/* 打分明细和上面的字段行之间画条线：它不是某一条请求字段，是识别过程的说明 */
-.detail-detection {
-  display: flex;
-  gap: var(--spacing-md);
-  margin-top: var(--spacing-md);
-  padding-top: var(--spacing-md);
-  border-top: 1px solid var(--border-default);
-  font-size: var(--font-size-sm);
-}
-
-.detail-detection .detection-body {
-  flex: 1;
-}
-
-.score-list {
-  list-style: none;
-  color: var(--text-secondary);
-}
-
-.score-list li {
-  padding: 1px 0;
-}
-
-.score-total {
-  margin-top: var(--spacing-xs);
-  color: var(--text-muted);
-  font-size: var(--font-size-xs);
 }
 
 /* 空态在卡片里收一档，与模块卡片里的空态同高 */
