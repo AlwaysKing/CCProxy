@@ -9,6 +9,8 @@ export const useClientDirsStore = defineStore('clientDirs', () => {
   const builtin = ref([])
   const manual = ref([])
   const expectedAddress = ref('')
+  // codex 的 app-server daemon 体检结果（没有 codex 目录时为 null）
+  const daemon = ref(null)
   const notice = ref('')
   const loaded = ref(false)
   const busy = ref(false)
@@ -32,7 +34,12 @@ export const useClientDirsStore = defineStore('clientDirs', () => {
 
   async function reload() {
     try {
-      const result = await window.electronAPI.getClientDirs()
+      // 两份一起取：目录检查与 daemon 死活是同一次刷新里的两半，分开取会闪
+      const [result, daemonResult] = await Promise.all([
+        window.electronAPI.getClientDirs(),
+        window.electronAPI.getCodexDaemon()
+      ])
+      if (daemonResult?.success) daemon.value = daemonResult.daemon
       if (result.success) applyResult(result)
       else notice.value = result.error || '扫描客户端目录失败'
     } catch (e) {
@@ -99,6 +106,7 @@ export const useClientDirsStore = defineStore('clientDirs', () => {
     builtin,
     manual,
     expectedAddress,
+    daemon,
     notice,
     loaded,
     busy,

@@ -164,9 +164,17 @@ impl AppState {
             &catalog,
         );
         if !result.applied.is_empty() {
+            // 顺手带上 daemon 死活：磁盘改完而 daemon 还在跑，用户看到的就是「改了没生效」，
+            // 排查时这行日志能省一次困惑
+            let daemon_running = entries
+                .iter()
+                .any(|entry| entry.kind == "codex" && crate::clients::daemon::inspect(&entry.path).running);
             logger::info(
                 "[ClientDirs] 模型清单已随配置自动更新",
-                Some(&json!({ "files": result.applied.iter().map(|item| item.file.clone()).collect::<Vec<String>>() })),
+                Some(&json!({
+                    "files": result.applied.iter().map(|item| item.file.clone()).collect::<Vec<String>>(),
+                    "codexDaemonRunning": daemon_running
+                })),
             );
         }
         for (path, message) in result.errors {

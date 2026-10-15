@@ -4,6 +4,7 @@
 pub mod apply;
 pub mod catalog;
 pub mod check;
+pub mod daemon;
 pub mod dirs;
 pub mod json;
 pub mod toml;
