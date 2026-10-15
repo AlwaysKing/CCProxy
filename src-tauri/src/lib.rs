@@ -4,6 +4,7 @@
 pub mod clients;
 pub mod commands;
 pub mod config;
+pub mod convert;
 pub mod logger;
 pub mod proxy;
 pub mod request_log;
