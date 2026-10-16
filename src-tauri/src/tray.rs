@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tauri::image::Image;
 use tauri::menu::{IconMenuItem, Menu, MenuBuilder};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 
 use crate::logger;
@@ -82,7 +82,20 @@ pub fn create(app: &AppHandle, state: &Arc<AppState>) -> tauri::Result<()> {
         .tooltip("CCProxy")
         .icon_as_template(true)
         .menu(&menu)
-        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()));
+        // 左键不再弹菜单，改由 on_tray_icon_event 直接打开窗口；右键仍由系统弹菜单
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
+        .on_tray_icon_event(|tray, event| {
+            // 只认左键抬起这一下，按下那次会重复触发
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_window(tray.app_handle());
+            }
+        });
     if let Some(icon) = icon {
         builder = builder.icon(icon);
     }
