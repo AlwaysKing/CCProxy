@@ -141,6 +141,19 @@ export const useConfigStore = defineStore('config', () => {
     })
   }
 
+  // 映射表顺序即匹配优先级：拖拽结束后把条目移到目标位置，整体落盘
+  function reorderMapping(protocolId, mappingId, targetIndex) {
+    return mutate((draft) => {
+      const protocol = findProtocol(draft, protocolId)
+      if (!protocol) return
+      const fromIndex = protocol.mappings.findIndex((item) => item.id === mappingId)
+      if (fromIndex < 0) return
+      const [mapping] = protocol.mappings.splice(fromIndex, 1)
+      const toIndex = Math.max(0, Math.min(targetIndex, protocol.mappings.length))
+      protocol.mappings.splice(toIndex, 0, mapping)
+    })
+  }
+
   function removeMapping(protocolId, mappingId) {
     return mutate((draft) => {
       const protocol = findProtocol(draft, protocolId)
@@ -179,6 +192,7 @@ export const useConfigStore = defineStore('config', () => {
     upsertProvider,
     removeProvider,
     upsertMapping,
+    reorderMapping,
     removeMapping,
     mappingsUsingProvider,
     updateSetting

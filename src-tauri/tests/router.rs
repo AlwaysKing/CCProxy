@@ -1,4 +1,4 @@
-// 映射查表单测：优先级（精确 > 通配最长前缀 > 兜底）、启停跳过、错误场景
+// 映射查表单测：列表顺序即优先级（首条命中）、启停跳过、错误场景
 
 use serde_json::{json, Value};
 
@@ -10,6 +10,8 @@ mod common;
 
 fn base(overrides: impl FnOnce(&mut Value)) -> ccproxy_lib::config::AppConfig {
     let mut value = json!({
+        // v5 起列表顺序即优先级；声明版本避免加载时按旧语义重排
+        "version": 5,
         "protocols": [
             {
                 "id": "anthropic", "name": "Anthropic", "enabled": true,
@@ -36,7 +38,8 @@ fn plain() -> ccproxy_lib::config::AppConfig {
 }
 
 #[test]
-fn exact_beats_wildcard_and_fallback() {
+fn first_matching_mapping_wins() {
+    // fixture 里精确规则排在最前，因此先于通配和兜底命中
     let route = resolve_routing(&plain(), "anthropic", "claude-sonnet-4").unwrap();
     assert_eq!(route.mapping.id, "exact");
     assert_eq!(route.real_model, "m1");
@@ -122,11 +125,27 @@ fn mapping_upstream_protocol_overrides_client_protocol() {
 }
 
 #[test]
-fn wildcard_prefers_longest_prefix() {
-    // wild-long 前缀更长，但它指向的供应商 p2 已停用 → 跳过，落给 wild-short
-    let route = resolve_routing(&plain(), "anthropic", "claude-3-5-haiku").unwrap();
+fn earlier_short_wildcard_beats_later_long_wildcard() {
+    // wild-long 前缀更长，但 wild-short 排在前面：首条命中即生效，不再按前缀长度排序
+    let config = base(|value| {
+        value["protocols"][0]["providers"][1]["enabled"] = json!(true);
+    });
+    let route = resolve_routing(&config, "anthropic", "claude-3-5-haiku").unwrap();
     assert_eq!(route.mapping.id, "wild-short");
     assert_eq!(route.real_model, "w1");
+}
+
+#[test]
+fn moving_a_mapping_up_gives_it_priority() {
+    let config = base(|value| {
+        value["protocols"][0]["mappings"] = json!([
+            { "id": "wild-first", "enabled": true, "clientModel": "claude-*", "providerId": "p1", "realModel": "w1" },
+            { "id": "exact-second", "enabled": true, "clientModel": "claude-3-5-haiku", "providerId": "p1", "realModel": "m1" }
+        ]);
+    });
+    let route = resolve_routing(&config, "anthropic", "claude-3-5-haiku").unwrap();
+    assert_eq!(route.mapping.id, "wild-first");
+    assert_eq!(route.match_kind, "wildcard");
 }
 
 #[test]
@@ -197,7 +216,7 @@ fn unknown_protocol_is_404() {
 }
 
 #[test]
-fn match_kind_marks_the_winning_round() {
+fn match_kind_reflects_winning_pattern() {
     // 界面的「精确/通配/兜底」徽章直接读这个字段
     assert_eq!(
         resolve_routing(&plain(), "anthropic", "claude-sonnet-4")

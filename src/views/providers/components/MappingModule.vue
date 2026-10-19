@@ -1,7 +1,7 @@
 <script setup>
 // 映射模块：当前协议的 clientModel → 供应商 / 真实模型 映射表。
-// 精确 > 通配 > 兜底 * 的优先级由主进程 router 决定，这里只把规则摊开给用户看并允许增删改启停。
-import { computed, ref } from 'vue'
+// 列表顺序即匹配优先级：主进程 router 从上到下取首条命中，这里允许增删改启停和拖拽排序。
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
 import { Badge, BaseButton, BaseTabs, ConfirmDialog, EmptyState, IconButton, ModuleCard, Toggle } from '@/components/base'
 import MappingDialog from './dialogs/MappingDialog.vue'
@@ -61,6 +61,87 @@ function upstreamName(protocol) {
   return '（上游协议已失效）'
 }
 
+// 拖拽排序：按行移动，只应用纵向位移，横向移动不生效。
+// 行内按钮（启停/编辑/删除）保留自己的点击行为，不作为拖拽起点
+const dragState = ref(null)
+
+function onRowPointerDown(event, index) {
+  if (event.button !== 0) return
+  if (event.target.closest('button, a, input, select, textarea')) return
+  if (props.protocol.mappings.length < 2) return
+  const row = event.currentTarget
+  dragState.value = {
+    id: props.protocol.mappings[index].id,
+    pointerId: event.pointerId,
+    from: index,
+    to: index,
+    startY: event.clientY,
+    offsetY: 0,
+    rowHeight: row.getBoundingClientRect().height
+  }
+  window.addEventListener('pointermove', onRowPointerMove)
+  window.addEventListener('pointerup', onRowPointerUp)
+  // 指针被系统手势打断、窗口失焦时 pointerup 不会到来，必须主动收尾，
+  // 否则残留的 move 监听会让行在没按住时继续跟着鼠标走
+  window.addEventListener('pointercancel', onRowPointerCancel)
+  window.addEventListener('blur', onRowPointerCancel)
+  event.preventDefault()
+}
+
+function cleanupDragListeners() {
+  window.removeEventListener('pointermove', onRowPointerMove)
+  window.removeEventListener('pointerup', onRowPointerUp)
+  window.removeEventListener('pointercancel', onRowPointerCancel)
+  window.removeEventListener('blur', onRowPointerCancel)
+}
+
+function onRowPointerMove(event) {
+  const state = dragState.value
+  if (!state || event.pointerId !== state.pointerId) return
+  state.offsetY = event.clientY - state.startY
+  // 目标位置按跨过的行数四舍五入，并夹在列表范围内
+  const last = props.protocol.mappings.length - 1
+  state.to = Math.max(0, Math.min(last, state.from + Math.round(state.offsetY / state.rowHeight)))
+}
+
+async function onRowPointerUp(event) {
+  const state = dragState.value
+  if (!state || event.pointerId !== state.pointerId || event.button !== 0) return
+  cleanupDragListeners()
+  dragState.value = null
+  if (state.from === state.to) return
+  const ok = await configStore.reorderMapping(props.protocol.id, state.id, state.to)
+  notice.value = ok ? '' : configStore.error || '排序保存失败'
+}
+
+function onRowPointerCancel(event) {
+  // blur 事件没有 pointerId，其余事件只在当前指针结束时才收尾
+  const state = dragState.value
+  if (!state || (event.pointerId !== undefined && event.pointerId !== state.pointerId)) return
+  cleanupDragListeners()
+  dragState.value = null
+}
+
+onBeforeUnmount(() => {
+  cleanupDragListeners()
+  dragState.value = null
+})
+
+// 被拖行跟手纵向移动，夹在起点与目标之间的行整体让位。
+// 位移通过 CSS 变量交给单元格应用：WKWebView 对 <tr> 的 transform 表现不稳定
+function rowStyle(index) {
+  const state = dragState.value
+  if (!state) return {}
+  if (index === state.from) return { '--drag-offset': `${state.offsetY}px` }
+  if (state.from < state.to && index > state.from && index <= state.to) {
+    return { '--drag-offset': `-${state.rowHeight}px` }
+  }
+  if (state.to < state.from && index >= state.to && index < state.from) {
+    return { '--drag-offset': `${state.rowHeight}px` }
+  }
+  return {}
+}
+
 function onAdd() {
   if (!canAdd.value) {
     notice.value = '先去下面的代理商模块添加一个供应商，映射才有目标可指'
@@ -94,7 +175,7 @@ async function onConfirmDelete() {
 <template>
   <ModuleCard title="映射模块" :notice="notice">
     <template #desc>
-      把客户端发来的模型名换成本协议下某个供应商的真实模型；匹配顺序为精确 &gt; 通配 &gt; 兜底 <code>*</code>。
+      把客户端发来的模型名换成本协议下某个供应商的真实模型；按列表从上到下匹配，首条命中生效，拖拽行即可调整优先级。
     </template>
       <!-- 添加按钮只挂在标题右侧这一处，空态里不再放第二个：同一个动作两个位置各有一个，
            而且空态比一行数据高，卡片高度会在「空 / 有内容」之间跳 -->
@@ -117,7 +198,13 @@ async function onConfirmDelete() {
         </tr>
       </thead>
       <tbody>
-        <tr v-for="row in rows" :key="row.mapping.id" :class="{ 'row-off': !row.mapping.enabled }">
+        <tr
+          v-for="(row, index) in rows"
+          :key="row.mapping.id"
+          :class="{ 'row-off': !row.mapping.enabled, 'row-dragging': dragState?.id === row.mapping.id }"
+          :style="rowStyle(index)"
+          @pointerdown="onRowPointerDown($event, index)"
+        >
           <td>
             <div class="cell-model">
               <code>{{ row.mapping.clientModel }}</code>
@@ -159,7 +246,7 @@ async function onConfirmDelete() {
     <EmptyState
       v-else
       title="还没有映射规则"
-      description="添加一条映射，把客户端模型名指到供应商的真实模型；建议至少留一条 * 兜底规则，未命中的请求才不会报 404"
+      description="添加一条映射，把客户端模型名指到供应商的真实模型；建议至少在列表最后留一条 * 兜底规则，未命中的请求才不会报 404"
     >
       <template #icon>
         <!-- 默认图标是「圆圈感叹号」，看着像坏掉的占位符；这里换成「分支」——一个客户端模型名分出去指向不同供应商 -->
@@ -195,6 +282,29 @@ async function onConfirmDelete() {
    表格在卡片里，自己不再铺底色和圆角，否则两块灰会叠在一起 */
 .row-off {
   opacity: 0.5;
+}
+
+/* 整行可拖拽：只上下移动调整匹配优先级，其他行平滑让位。
+   transform 落在 td 上（不是 tr），位移量由行内联的 --drag-offset 提供 */
+.data-table tbody tr {
+  cursor: grab;
+}
+
+.data-table tbody tr.row-dragging {
+  cursor: grabbing;
+}
+
+.data-table tbody td {
+  position: relative;
+  transform: translateY(var(--drag-offset, 0px));
+  transition: transform var(--transition-fast);
+}
+
+/* 拖拽中的行盖在其他行上面，并补上底色，避免被下方行透出来 */
+.data-table tbody tr.row-dragging td {
+  z-index: 2;
+  background-color: var(--bg-secondary);
+  transition: none;
 }
 
 .mapping-head-actions {

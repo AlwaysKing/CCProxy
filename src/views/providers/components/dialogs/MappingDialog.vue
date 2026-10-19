@@ -89,8 +89,14 @@ function modelNames(group) {
   return (group?.models ?? []).map((model) => model.name)
 }
 
-function firstUpstreamProtocol(provider) {
+// 默认上游协议优先跟当前客户端协议一致（同协议不需要转换）；
+// 供应商没有对应模型组时退回第一项，保证下拉里一定有个能选中的值。
+function defaultUpstreamProtocol(provider) {
   if (!provider?.modelGroups?.length) return ''
+  const hasGroup = (apiFormat) => provider.modelGroups.some((group) => group.apiFormat === apiFormat)
+  const client = props.protocol.id
+  if (client === 'anthropic' && hasGroup('anthropic')) return 'anthropic'
+  if ((client === 'openai_chat' || client === 'openai_responses') && hasGroup('openai')) return client
   return provider.modelGroups[0].apiFormat === 'anthropic' ? 'anthropic' : 'openai_chat'
 }
 
@@ -116,9 +122,9 @@ watch(
   (visible) => {
     if (!visible) return
     error.value = ''
-    // 新增时供应商、上游协议和模型都默认选第一项：只有一个供应商的常见场景下能少点两次
+    // 新增时供应商和模型默认选第一项；上游协议优先匹配当前客户端协议，少点两次
     const first = configStore.providers[0]
-    const firstUpstream = firstUpstreamProtocol(first)
+    const firstUpstream = defaultUpstreamProtocol(first)
     const firstGroup = groupForUpstream(first, firstUpstream)
     form.value = props.mapping
       ? {
@@ -136,13 +142,13 @@ watch(
   }
 )
 
-// 换供应商后旧上游协议与模型都可能失效：换成新供应商的第一个协议与模型。
+// 换供应商后旧上游协议与模型都可能失效：换成与当前客户端协议匹配的上游协议与模型（无匹配组时回退）。
 watch(
   () => form.value.providerId,
   (id, prevId) => {
     if (!id || !prevId || id === prevId) return
     const provider = configStore.providers.find((item) => item.id === id)
-    const upstream = firstUpstreamProtocol(provider)
+    const upstream = defaultUpstreamProtocol(provider)
     form.value.upstreamProtocol = upstream
     const models = modelNames(groupForUpstream(provider, upstream))
     if (!models.includes(form.value.realModel)) form.value.realModel = models[0] ?? ''
@@ -209,7 +215,7 @@ async function onConfirm() {
     width="480px"
     @update:model-value="emit('update:modelValue', $event)"
   >
-    <FormField label="客户端模型" hint="支持 * 通配（如 claude-sonnet-4-*），单独一个 * 表示兜底，优先级最低；留空则自动用 供应商名-真实模型">
+    <FormField label="客户端模型" hint="支持 * 通配（如 claude-sonnet-4-*），单独一个 * 表示兜底；按列表顺序从上到下匹配，越靠前优先级越高；留空则自动用 供应商名-真实模型">
       <BaseInput v-model="form.clientModel" placeholder="留空自动用 供应商名-模型名" />
     </FormField>
 

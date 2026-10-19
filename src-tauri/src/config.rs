@@ -13,7 +13,10 @@ use serde_json::{json, Value};
 // v2：协议拆成三条，供应商从 protocols[].providers 提到顶层并声明 apiFormat。
 // v4：供应商仍是全局池，地址与 token 挂在供应商上；模型列表只分 Claude / OpenAI 两类，
 // 映射明确记录上游协议，路由直接按它决定透传或转换。
-pub const CONFIG_VERSION: u32 = 4;
+// v5：映射表顺序即匹配优先级；低版本配置升级时按旧优先级稳定排序一次，命中结果不变。
+pub const CONFIG_VERSION: u32 = 5;
+// 从这一版起列表顺序决定匹配优先级，低于它的配置需要按旧语义整理一次
+const MAPPING_ORDER_VERSION: u32 = 5;
 pub const DEFAULT_PORT: u16 = 18888;
 // 客户端线格式三条线。协议只决定「客户端发来的模型名按哪张映射表查」；
 // 模型属于 Claude 还是 OpenAI 由映射所属模型组决定；OpenAI 的 Chat / Responses 目标由映射协议决定。
@@ -740,6 +743,22 @@ fn build_protocol(
     protocol
 }
 
+// v5 之前的匹配规则是：精确 > 通配（前缀越长越优先）> 兜底 *，与列表顺序无关。
+// 升级时按这套规则稳定排序一次，保证升级前后实际命中的映射不变；之后顺序即可拖拽调整。
+fn sort_mappings_legacy_priority(mappings: &mut [Mapping]) {
+    fn legacy_key(pattern: &str) -> (u8, std::cmp::Reverse<usize>) {
+        if pattern == "*" {
+            (2, std::cmp::Reverse(0))
+        } else if pattern.len() > 1 && pattern.ends_with('*') {
+            (1, std::cmp::Reverse(pattern.len()))
+        } else {
+            (0, std::cmp::Reverse(0))
+        }
+    }
+    // sort_by_key 是稳定排序：同优先级条目保持原有相对顺序
+    mappings.sort_by_key(|mapping| legacy_key(&mapping.client_model));
+}
+
 // 手动目录条目：id/kind/path 齐全才留；path 必须是绝对路径——扫描按原样去找，
 // 相对路径会随进程工作目录漂移，存下来就是隐患
 fn normalize_client_dirs(raw: Option<&Value>, issues: &mut Vec<String>) -> Vec<ClientDir> {
@@ -891,7 +910,7 @@ fn referenced_protocols(raw_protocols: &[Value], provider_id: &str) -> Vec<Strin
     result
 }
 
-// 配置是不是老结构：版本未到 v4，协议下挂着 providers，还留着拆分前的 openai 协议，
+// 配置是不是老结构：版本未到当前版本，协议下挂着 providers，还留着拆分前的 openai 协议，
 // 或顶层供应商仍是 v2 的单组结构。
 fn has_legacy_shape(raw: &Value) -> bool {
     if raw.get("version").and_then(Value::as_u64).unwrap_or(0) < CONFIG_VERSION as u64 {
@@ -965,6 +984,7 @@ pub fn validate_config(raw: &Value) -> Validated {
         ));
     }
 
+    let raw_version = raw.get("version").and_then(Value::as_u64).unwrap_or(0);
     let raw_protocols = raw.get("protocols").and_then(Value::as_array).cloned();
     if raw_protocols.is_none() {
         issues.push("protocols 不是数组，已重置为默认协议".to_string());
@@ -1059,7 +1079,7 @@ pub fn validate_config(raw: &Value) -> Validated {
     }
 
     let mut migrated_legacy = false;
-    let protocols: Vec<Protocol> = SUPPORTED_PROTOCOLS
+    let mut protocols: Vec<Protocol> = SUPPORTED_PROTOCOLS
         .iter()
         .map(|(id, name)| {
             let mut matched = raw_protocols
@@ -1078,6 +1098,12 @@ pub fn validate_config(raw: &Value) -> Validated {
             build_protocol(matched, id, name, &providers, &mut issues)
         })
         .collect();
+    // 旧版配置的列表顺序不参与路由，升级时整理成旧语义下的优先级顺序
+    if raw_version < MAPPING_ORDER_VERSION as u64 {
+        for protocol in &mut protocols {
+            sort_mappings_legacy_priority(&mut protocol.mappings);
+        }
+    }
     if migrated_legacy {
         issues.push(
             "OpenAI 协议已拆成 OpenAI Chat 与 OpenAI Responses 两条，原映射表已各复制一份"
@@ -1208,14 +1234,8 @@ impl ConfigManager {
             return;
         }
         let version = raw.get("version").and_then(Value::as_u64).unwrap_or(0);
-        let backup_name = if version >= 3 {
-            "app.json.v3.bak"
-        } else if version >= 2 {
-            "app.json.v2.bak"
-        } else {
-            "app.json.v1.bak"
-        };
-        let mut backup = self.base_dir.join(backup_name);
+        let backup_name = format!("app.json.v{}.bak", version.max(1));
+        let mut backup = self.base_dir.join(&backup_name);
         let mut suffix = 1;
         while backup.exists() {
             backup = self.base_dir.join(format!("{backup_name}.{suffix}"));
@@ -1226,7 +1246,12 @@ impl ConfigManager {
             Err(error) => format!("复制原文件失败：{error}"),
         };
         let encoded = serde_json::to_value(config).unwrap_or(Value::Null);
-        let note = "已把旧版配置升级为新结构（供应商保持全局池、模型列表按 Claude / OpenAI 归类）";
+        // v4 的结构本身没变，只是映射顺序开始参与路由；更老的版本才是结构升级
+        let note = if version >= 4 {
+            "已把旧版配置升级为当前版本（映射表已按原优先级整理，之后可用拖拽调整）"
+        } else {
+            "已把旧版配置升级为新结构（供应商保持全局池、模型列表按 Claude / OpenAI 归类）"
+        };
         match self.save(&encoded) {
             Ok((_, save_issues)) => {
                 issues.push(format!("{note}。{backup_note}"));

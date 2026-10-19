@@ -1,5 +1,6 @@
 // 映射查表：在指定协议的映射表里为客户端模型名找到目标供应商与真实模型名。
-// 优先级：精确匹配 > 通配匹配（前缀最长者优先）> 兜底规则（clientModel 为 *）。
+// 匹配规则：按映射表顺序从上到下逐条匹配，第一条命中的规则生效——列表顺序即优先级，
+// 前端拖拽排序就是在调整它。
 // 启停规则：协议停用报 503；供应商或单条映射停用的条目视为不可用直接跳过。
 
 use crate::config::{AppConfig, Mapping, ModelGroup, Provider};
@@ -84,25 +85,18 @@ pub fn resolve_routing(config: &AppConfig, protocol_id: &str, client_model: &str
         usable.push((mapping, provider, group));
     }
 
-    // 三轮各记一个 matchKind：请求日志要写「命中规则」，而「是哪一轮命中的」只有这里知道。
-    // 第一轮：精确匹配
-    let mut hit = usable.iter().find(|(mapping, _, _)| mapping.client_model == client_model);
-    let mut match_kind = if hit.is_some() { Some("exact") } else { None };
-    // 第二轮：通配，前缀最长者优先
-    if hit.is_none() {
-        let mut wildcards: Vec<&(&Mapping, &Provider, &ModelGroup)> = usable
-            .iter()
-            .filter(|(mapping, _, _)| is_wildcard_pattern(&mapping.client_model) && match_mapping(mapping, client_model))
-            .collect();
-        wildcards.sort_by(|a, b| b.0.client_model.len().cmp(&a.0.client_model.len()));
-        hit = wildcards.first().copied();
-        match_kind = if hit.is_some() { Some("wildcard") } else { None };
-    }
-    // 第三轮：兜底
-    if hit.is_none() {
-        hit = usable.iter().find(|(mapping, _, _)| mapping.client_model == "*");
-        match_kind = if hit.is_some() { Some("fallback") } else { None };
-    }
+    // 按映射表顺序匹配，首条命中生效。matchKind 由命中的规则形态推导，供请求日志展示
+    let hit = usable.iter().find(|(mapping, _, _)| match_mapping(mapping, client_model));
+    let match_kind = hit.map(|(mapping, _, _)| {
+        let pattern = mapping.client_model.as_str();
+        if pattern == "*" {
+            "fallback"
+        } else if is_wildcard_pattern(pattern) {
+            "wildcard"
+        } else {
+            "exact"
+        }
+    });
 
     let Some((mapping, provider, group)) = hit else {
         let label = if client_model.is_empty() { "(空)" } else { client_model };
@@ -126,4 +120,101 @@ pub fn resolve_routing(config: &AppConfig, protocol_id: &str, client_model: &str
         match_kind: match_kind.unwrap_or("exact").to_string(),
         real_model: mapping.real_model.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Model, Protocol, Settings, CONFIG_VERSION, DEFAULT_PORT};
+
+    fn mapping(id: &str, client_model: &str, real_model: &str) -> Mapping {
+        Mapping {
+            id: id.to_string(),
+            enabled: true,
+            client_model: client_model.to_string(),
+            provider_id: "p1".to_string(),
+            model_group_id: "g1".to_string(),
+            upstream_protocol: "anthropic".to_string(),
+            real_model: real_model.to_string(),
+        }
+    }
+
+    fn config_with(mappings: Vec<Mapping>) -> AppConfig {
+        AppConfig {
+            version: CONFIG_VERSION,
+            settings: Settings {
+                port: DEFAULT_PORT,
+                launch_at_login: false,
+                logs_enabled: true,
+                usage_enabled: true,
+                client_dirs: Vec::new(),
+                client_token: String::new(),
+            },
+            providers: vec![Provider {
+                id: "p1".to_string(),
+                name: "测试供应商".to_string(),
+                enabled: true,
+                base_url: "https://example.com".to_string(),
+                token: "sk-test".to_string(),
+                model_groups: vec![ModelGroup {
+                    id: "g1".to_string(),
+                    api_format: "anthropic".to_string(),
+                    models: vec![Model {
+                        name: "real-a".to_string(),
+                        context_window: None,
+                        max_context_window: None,
+                        input_modalities: None,
+                        reasoning: None,
+                    }],
+                }],
+            }],
+            protocols: vec![Protocol {
+                id: "anthropic".to_string(),
+                name: "Anthropic".to_string(),
+                enabled: true,
+                mappings,
+            }],
+        }
+    }
+
+    fn resolve(config: &AppConfig, client_model: &str) -> (String, String) {
+        let route = resolve_routing(config, "anthropic", client_model).expect("应当命中映射");
+        (route.real_model, route.match_kind)
+    }
+
+    #[test]
+    fn wildcard_above_exact_wins_by_list_order() {
+        let config = config_with(vec![
+            mapping("m1", "claude-*", "real-wildcard"),
+            mapping("m2", "claude-3", "real-exact"),
+        ]);
+        assert_eq!(resolve(&config, "claude-3"), ("real-wildcard".to_string(), "wildcard".to_string()));
+    }
+
+    #[test]
+    fn exact_above_wildcard_wins_by_list_order() {
+        let config = config_with(vec![
+            mapping("m1", "claude-3", "real-exact"),
+            mapping("m2", "claude-*", "real-wildcard"),
+        ]);
+        assert_eq!(resolve(&config, "claude-3"), ("real-exact".to_string(), "exact".to_string()));
+        assert_eq!(resolve(&config, "claude-4"), ("real-wildcard".to_string(), "wildcard".to_string()));
+    }
+
+    #[test]
+    fn fallback_above_others_wins_by_list_order() {
+        let config = config_with(vec![
+            mapping("m1", "*", "real-fallback"),
+            mapping("m2", "claude-3", "real-exact"),
+        ]);
+        assert_eq!(resolve(&config, "claude-3"), ("real-fallback".to_string(), "fallback".to_string()));
+    }
+
+    #[test]
+    fn disabled_mapping_is_skipped() {
+        let mut disabled = mapping("m1", "claude-*", "real-wildcard");
+        disabled.enabled = false;
+        let config = config_with(vec![disabled, mapping("m2", "claude-3", "real-exact")]);
+        assert_eq!(resolve(&config, "claude-3"), ("real-exact".to_string(), "exact".to_string()));
+    }
 }

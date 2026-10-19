@@ -673,10 +673,10 @@ fn loading_a_legacy_file_backs_it_up_and_writes_the_new_shape() {
         legacy_text
     );
 
-    // 落盘的是新结构：供应商在顶层、协议下没有 providers、版本号 3，其余设置原样保留
+    // 落盘的是新结构：供应商在顶层、协议下没有 providers、版本号升到 5，其余设置原样保留
     let saved: Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
-    assert_eq!(saved["version"], json!(4));
+    assert_eq!(saved["version"], json!(5));
     assert_eq!(
         saved["providers"][0]["modelGroups"][0]["apiFormat"],
         json!("anthropic")
@@ -743,7 +743,7 @@ fn loading_a_v2_file_backs_up_and_expands_models_without_losing_abilities() {
     assert_eq!(std::fs::read_to_string(dir.join("app.json.v2.bak")).unwrap(), legacy_text);
 
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
-    assert_eq!(saved["version"], json!(4));
+    assert_eq!(saved["version"], json!(5));
     assert_eq!(saved["providers"][0]["modelGroups"].as_array().unwrap().len(), 1);
     assert!(saved["providers"][0].get("apiFormat").is_none());
 }
@@ -810,6 +810,70 @@ fn loading_intermediate_v3_promotes_group_address_and_token() {
     assert_eq!(saved["providers"][0]["token"], json!("sk-shared"));
     assert!(saved["providers"][0]["modelGroups"][0].get("baseUrl").is_none());
     assert!(saved["providers"][0]["modelGroups"][0].get("token").is_none());
+}
+
+#[test]
+fn loading_v4_sorts_mappings_into_legacy_priority_order() {
+    let dir = TempDir::new("ccproxy-cfg");
+    let manager = manager(&dir);
+    let legacy = json!({
+        "version": 4,
+        "settings": { "port": 19000 },
+        "providers": [{
+            "id": "p1", "name": "供应商", "enabled": true,
+            "baseUrl": "https://p1.example.com", "token": "sk-x",
+            "modelGroups": [{
+                "id": "g1", "apiFormat": "anthropic",
+                "models": [{ "name": "m1" }]
+            }]
+        }],
+        "protocols": [{
+            "id": "anthropic", "enabled": true,
+            "mappings": [
+                { "id": "wild-b", "enabled": true, "clientModel": "claude-b*", "providerId": "p1", "modelGroupId": "g_anthropic", "realModel": "m1" },
+                { "id": "fallback", "enabled": true, "clientModel": "*", "providerId": "p1", "modelGroupId": "g_anthropic", "realModel": "m1" },
+                { "id": "wild-short", "enabled": true, "clientModel": "claude-*", "providerId": "p1", "modelGroupId": "g_anthropic", "realModel": "m1" },
+                { "id": "wild-long", "enabled": true, "clientModel": "claude-3-5-*", "providerId": "p1", "modelGroupId": "g_anthropic", "realModel": "m1" },
+                { "id": "wild-a", "enabled": true, "clientModel": "claude-a*", "providerId": "p1", "modelGroupId": "g_anthropic", "realModel": "m1" },
+                { "id": "exact", "enabled": true, "clientModel": "claude-3-5-sonnet", "providerId": "p1", "modelGroupId": "g_anthropic", "realModel": "m1" }
+            ]
+        }]
+    });
+    let legacy_text = serde_json::to_string_pretty(&legacy).unwrap();
+    dir.write("app.json", &legacy_text);
+
+    let loaded = manager.load();
+    let ids: Vec<&str> = loaded.config.protocols[0]
+        .mappings
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+    // 旧语义：精确 > 通配（前缀长的在前）> 兜底。升级时排一次序，命中结果与升级前一致；
+    // wild-a / wild-b 等长，保持原相对顺序（稳定排序）
+    assert_eq!(
+        ids,
+        vec!["exact", "wild-long", "wild-b", "wild-a", "wild-short", "fallback"]
+    );
+    assert!(loaded
+        .issues
+        .iter()
+        .any(|issue| issue.contains("已把旧版配置升级为当前版本")));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("app.json.v4.bak")).unwrap(),
+        legacy_text
+    );
+
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
+    assert_eq!(saved["version"], json!(5));
+    // 落盘顺序也要是整理后的顺序，不能每次加载都重排
+    let saved_ids: Vec<&str> = saved["protocols"][0]["mappings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(saved_ids, ids);
 }
 
 #[test]
