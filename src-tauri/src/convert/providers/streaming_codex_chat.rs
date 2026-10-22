@@ -7,7 +7,7 @@ use super::{
     inline_think::InlineThinkSplitter,
     transform_codex_chat::{
         chat_usage_to_responses_usage, custom_tool_input_from_chat_arguments,
-        response_id_from_chat_id, response_status_from_finish_reason,
+        dropped_tool_call_log_line, response_id_from_chat_id, response_status_from_finish_reason,
         response_tool_call_item_from_chat_name, response_tool_call_item_id_from_chat_name,
         CodexToolContext,
     },
@@ -371,7 +371,7 @@ impl ChatToResponsesState {
                 self.next_tool_index_to_add += 1;
                 continue;
             }
-            if state.call_id.is_empty() || state.name.is_empty() {
+            if state.call_id.is_empty() || state.name.trim().is_empty() {
                 break;
             }
 
@@ -590,14 +590,15 @@ impl ChatToResponsesState {
                 // 只记结构信息：arguments 内容可能包含用户代码，且前端日志出口是
                 // allowlist 脱敏，新字段不进白名单就不会被处理，因此只输出字节数。
                 log::warn!(
-                    "[Codex] dropped streaming tool call: model={} chat_index={} \
-                     call_id_empty={} args_bytes={} finish_reason={} tools_total={}",
-                    self.model,
-                    key,
-                    call_id_empty,
-                    args_bytes,
-                    self.finish_reason.as_deref().unwrap_or("<none>"),
-                    self.tools.len()
+                    "{}",
+                    dropped_tool_call_log_line(
+                        "streaming",
+                        Some(key),
+                        !call_id_empty,
+                        args_bytes,
+                        self.finish_reason.as_deref(),
+                        Some(self.tools.len()),
+                    )
                 );
                 continue;
             }
@@ -1175,6 +1176,8 @@ mod tests {
         assert!(output.contains("event: response.failed"));
         assert!(output.contains("upstream_tool_call_dropped"));
         assert!(!output.contains("event: response.completed"));
+        assert!(!output.contains("event: response.output_item.added"));
+        assert!(!output.contains("\"name\":\"   \""));
     }
 
     /// 纯文本回合（从未出现过工具调用增量）不受判据影响。

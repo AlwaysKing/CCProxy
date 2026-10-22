@@ -1755,8 +1755,12 @@ pub(crate) fn chat_completion_to_response_with_context(
     if let Some(message_item) = chat_message_to_response_output_item(message, &response_id) {
         output.push(message_item);
     }
-    let tool_calls =
-        chat_tool_calls_to_response_output_items(message, reasoning.as_deref(), tool_context);
+    let tool_calls = chat_tool_calls_to_response_output_items(
+        message,
+        reasoning.as_deref(),
+        finish_reason,
+        tool_context,
+    );
 
     // 丢弃过工具调用、且最终一个工具调用都没剩下时，Codex 会收到一个
     // "status=completed 但 output 里没有任何工具调用" 的回合，agent loop 必然静默
@@ -1906,6 +1910,7 @@ struct ChatToolCallItems {
 fn chat_tool_calls_to_response_output_items(
     message: &Value,
     reasoning: Option<&str>,
+    finish_reason: Option<&str>,
     tool_context: &CodexToolContext,
 ) -> ChatToolCallItems {
     let mut output = Vec::new();
@@ -1931,9 +1936,15 @@ fn chat_tool_calls_to_response_output_items(
                     .map(str::len)
                     .unwrap_or(0);
                 log::warn!(
-                    "[Codex] dropped tool call: index={index} call_id_empty={call_id_empty} \
-                     args_bytes={args_bytes} tools_total={}",
-                    tool_calls.len()
+                    "{}",
+                    dropped_tool_call_log_line(
+                        "chat_tool_calls",
+                        Some(index),
+                        !call_id_empty,
+                        args_bytes,
+                        finish_reason,
+                        Some(tool_calls.len()),
+                    )
                 );
                 continue;
             }
@@ -1945,7 +1956,12 @@ fn chat_tool_calls_to_response_output_items(
             ));
         }
     } else if let Some(function_call) = message.get("function_call") {
-        match chat_legacy_function_call_to_response_item(function_call, reasoning, tool_context) {
+        match chat_legacy_function_call_to_response_item(
+            function_call,
+            reasoning,
+            finish_reason,
+            tool_context,
+        ) {
             Some(item) => output.push(item),
             None => dropped += 1,
         }
@@ -1988,13 +2004,15 @@ fn chat_tool_call_to_response_item(
 fn chat_legacy_function_call_to_response_item(
     function_call: &Value,
     reasoning: Option<&str>,
+    finish_reason: Option<&str>,
     tool_context: &CodexToolContext,
 ) -> Option<Value> {
-    let call_id = function_call
+    let explicit_call_id = function_call
         .get("id")
         .and_then(|v| v.as_str())
-        .filter(|v| !v.is_empty())
-        .unwrap_or("call_0");
+        .filter(|v| !v.is_empty());
+    let call_id_present = explicit_call_id.is_some();
+    let call_id = explicit_call_id.unwrap_or("call_0");
     let name = function_call
         .get("name")
         .and_then(|v| v.as_str())
@@ -2011,7 +2029,15 @@ fn chat_legacy_function_call_to_response_item(
             .map(str::len)
             .unwrap_or(0);
         log::warn!(
-            "[Codex] dropped legacy function_call: call_id={call_id} args_bytes={args_bytes}"
+            "{}",
+            dropped_tool_call_log_line(
+                "legacy_function_call",
+                Some(0),
+                call_id_present,
+                args_bytes,
+                finish_reason,
+                Some(1),
+            )
         );
         return None;
     }
@@ -2240,6 +2266,29 @@ pub(crate) fn response_status_from_finish_reason(finish_reason: Option<&str>) ->
         Some("length") => "incomplete",
         _ => "completed",
     }
+}
+
+pub(super) fn dropped_tool_call_log_line(
+    source: &str,
+    index: Option<usize>,
+    call_id_present: bool,
+    args_bytes: usize,
+    finish_reason: Option<&str>,
+    tools_total: Option<usize>,
+) -> String {
+    let index = index
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let finish_reason = finish_reason.unwrap_or("<none>");
+    let tools_total = tools_total
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    format!(
+        "[Codex] dropped tool call: source={source} index={index} \
+         call_id_present={call_id_present} args_bytes={args_bytes} \
+         finish_reason={finish_reason} tools_total={tools_total}"
+    )
 }
 
 /// 把 Chat Completions 上游的错误体规整成 OpenAI Responses API 风格的错误对象。
@@ -5489,6 +5538,24 @@ mod tests {
         let err = chat_completion_to_response_with_context(chat, &CodexToolContext::default())
             .unwrap_err();
         assert!(matches!(err, ProxyError::TransformError(_)));
+    }
+
+    #[test]
+    fn dropped_tool_call_log_line_is_sanitized_and_structured() {
+        let line = dropped_tool_call_log_line(
+            "legacy_function_call",
+            None,
+            true,
+            17,
+            Some("tool_calls"),
+            Some(1),
+        );
+
+        assert_eq!(
+            line,
+            "[Codex] dropped tool call: source=legacy_function_call index=- \
+             call_id_present=true args_bytes=17 finish_reason=tool_calls tools_total=1"
+        );
     }
 
     /// 纯文本回合（从未出现工具调用）不受判据影响。
