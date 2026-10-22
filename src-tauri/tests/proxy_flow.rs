@@ -353,6 +353,75 @@ async fn end_to_end_responses_stream_records_usage() {
 }
 
 #[tokio::test]
+async fn end_to_end_responses_stream_without_content_type_records_usage() {
+    // 网关的流式回复只带 chunked、不带 content-type（本机 company 那条线上就是这样），
+    // 只看响应头的话代理会把整段 SSE 当 JSON 缓冲：分块没了、用量和模型回写也一起丢
+    let captured = sink();
+    let (mock_port, mock_stop) = mock_upstream(captured.clone(), |_| {
+        Response::builder()
+            .status(200)
+            .body(Body::from(
+                [
+                    "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"deepseek-vl-flash\"},\"sequence_number\":0}\n\n",
+                    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"deepseek-vl-flash\",\"status\":\"completed\",\"usage\":{\"input_tokens\":120,\"input_tokens_details\":{\"cached_tokens\":64},\"output_tokens\":45,\"total_tokens\":165}}}\n\n",
+                ]
+                .concat(),
+            ))
+            .unwrap()
+    })
+    .await;
+
+    let dir = TempDir::new("ccproxy-e2e");
+    let state = test_state(
+        config_with_port(
+            json!({
+                "protocols": [{
+                    "id": "openai", "name": "OpenAI", "enabled": true,
+                    "providers": [{
+                        "id": "q1", "name": "mock上游", "enabled": true,
+                        "baseUrl": format!("http://127.0.0.1:{mock_port}/v1"),
+                        "token": "sk-real-openai",
+                        "models": [{ "name": "deepseek-vl-flash" }]
+                    }],
+                    "mappings": [
+                        { "id": "m1", "enabled": true, "clientModel": "deepseek-flash", "providerId": "q1", "realModel": "deepseek-vl-flash" }
+                    ]
+                }]
+            }),
+            0,
+        ),
+        &dir,
+    );
+    let port = start_proxy(&state).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer sk-fake")
+        .header("accept", "text/event-stream")
+        .body(serde_json::to_vec(&json!({ "model": "deepseek-flash", "stream": true, "input": [] })).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    // 上游没写内容类型，代理认出来之后要补一个，客户端才知道这是 SSE
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let text = response.text().await.unwrap();
+    assert!(text.contains("response.completed"));
+    assert!(text.contains("\"model\":\"deepseek-flash\""), "实际：{text}");
+    assert!(!text.contains("deepseek-vl-flash"), "真实模型名不该回给客户端：{text}");
+
+    let usage = state.request_log.usage(&json!({ "days": 1 }));
+    assert_eq!(usage["totals"]["requests"], json!(1));
+    assert_eq!(usage["totals"]["input"], json!(120));
+    assert_eq!(usage["totals"]["output"], json!(45));
+    assert_eq!(usage["totals"]["cacheRead"], json!(64));
+
+    state.proxy.stop().await;
+    let _ = mock_stop.send(());
+}
+
+#[tokio::test]
 async fn end_to_end_mapping_miss_is_404() {
     let captured = sink();
     let (mock_port, mock_stop) = mock_upstream(captured.clone(), |_| Response::new(Body::from("nope"))).await;

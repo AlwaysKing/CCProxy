@@ -198,6 +198,77 @@ fn find_event_boundary(bytes: &[u8]) -> Option<usize> {
     bytes.windows(2).position(|pair| pair == b"\n\n")
 }
 
+// 正文开头像不像 SSE。有的 OpenAI 兼容网关流式回复压根不带 content-type，
+// 只看响应头会把整段 SSE 当 JSON 缓冲（分块没了、用量也解析不到），所以要按正文判断
+enum SseGuess {
+    Yes,
+    No,
+    Unknown,
+}
+
+fn guess_sse(bytes: &[u8]) -> SseGuess {
+    let text = String::from_utf8_lossy(bytes);
+    let trimmed = text.trim_start_matches('\u{feff}').trim_start();
+    if trimmed.is_empty() {
+        return SseGuess::Unknown;
+    }
+    const FIELD_PREFIXES: [&str; 5] = ["data:", "event:", "id:", "retry:", ":"];
+    if FIELD_PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix)) {
+        return SseGuess::Yes;
+    }
+    // 读到一半的前缀（如 "even"）说明还没法判断，继续读
+    if FIELD_PREFIXES.iter().any(|prefix| prefix.starts_with(trimmed)) {
+        return SseGuess::Unknown;
+    }
+    SseGuess::No
+}
+
+// 先窥探上游正文开头，判断是不是 SSE。读到的字节放进 head，后续转发时接回流头，
+// 一个字节都不丢；判定不出形状时最多攒 64 字节就按非 SSE 处理
+async fn peek_sse(upstream: &mut UpstreamStream, head: &mut Vec<Bytes>) -> Result<bool, String> {
+    let mut buffer = BytesMut::new();
+    loop {
+        match guess_sse(&buffer) {
+            SseGuess::Yes => return Ok(true),
+            SseGuess::No => return Ok(false),
+            SseGuess::Unknown => {}
+        }
+        if buffer.len() > 64 {
+            return Ok(false);
+        }
+        let next = tokio::time::timeout(
+            Duration::from_millis(STREAM_IDLE_TIMEOUT_MS),
+            upstream.next(),
+        )
+        .await;
+        match next {
+            Ok(Some(Ok(chunk))) => {
+                buffer.extend_from_slice(&chunk);
+                head.push(chunk);
+            }
+            Ok(Some(Err(message))) => return Err(message),
+            Ok(None) => return Ok(false),
+            Err(_) => return Ok(false),
+        }
+    }
+}
+
+// 整块读回来：head 是窥探阶段已经读走的字节，要先接回上游流前面
+async fn collect_stream(head: Vec<Bytes>, rest: UpstreamStream, timeout: Duration) -> Result<Bytes, String> {
+    let mut merged = stream::iter(head.into_iter().map(Ok::<Bytes, String>)).chain(rest);
+    let collected = async move {
+        let mut buffer = BytesMut::new();
+        while let Some(item) = merged.next().await {
+            buffer.extend_from_slice(&item?);
+        }
+        Ok::<Bytes, String>(buffer.freeze())
+    };
+    match tokio::time::timeout(timeout, collected).await {
+        Ok(result) => result,
+        Err(_) => Err(format!("上游响应超过 {}ms", timeout.as_millis())),
+    }
+}
+
 // 上游字节流：错误统一化成 String——透传时是 reqwest 的错误，转换时是转换器的 io 错误，
 // 汇到一条错误通道里，下游只需要一种处理
 type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, String>> + Send>>;
@@ -613,32 +684,50 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
     let converting_body = converting && (200..300).contains(&status);
 
     if is_streaming {
-        // 上游没按 stream 参数办事（content-type 不是 SSE）时先整块读回来：客户端等的是 SSE，
+        // 上游正文统一当字节流处理：是否 SSE 由正文开头决定，光看 content-type 不够
+        let mut upstream_bytes: UpstreamStream =
+            Box::pin(upstream.bytes_stream().map(|item| item.map_err(|error| error.to_string())));
+        let mut head: Vec<Bytes> = Vec::new();
+        let sse_stream = if upstream_is_sse {
+            true
+        } else {
+            match peek_sse(&mut upstream_bytes, &mut head).await {
+                Ok(found) => found,
+                Err(message) => {
+                    build_entry(
+                        ForwardOutcome { status_code: 502, error: Some(message.clone()), cancelled: false },
+                        None,
+                    );
+                    return json_response(
+                        502,
+                        &json!({ "error": { "type": "ccproxy_upstream", "message": format!("上游请求失败: {message}") } }),
+                    );
+                }
+            }
+        };
+
+        // 上游确实没按 stream 参数办事（正文不是 SSE）时先整块读回来：客户端等的是 SSE，
         // 把一整块 JSON 丢过去它只会当成空响应。先转成客户端格式，再展开成 SSE 生命周期
-        if !upstream_is_sse {
-            let collected =
-                match tokio::time::timeout(Duration::from_millis(NON_STREAM_TIMEOUT_MS), upstream.bytes()).await {
-                    Ok(Ok(bytes)) => bytes,
-                    Ok(Err(error)) => {
-                        let message = error.to_string();
-                        build_entry(
-                            ForwardOutcome { status_code: 502, error: Some(message.clone()), cancelled: false },
-                            None,
-                        );
-                        return json_response(
-                            502,
-                            &json!({ "error": { "type": "ccproxy_upstream", "message": format!("上游请求失败: {message}") } }),
-                        );
-                    }
-                    Err(_) => {
-                        let message = format!("上游响应超过 {NON_STREAM_TIMEOUT_MS}ms");
-                        build_entry(
-                            ForwardOutcome { status_code: 502, error: Some(message.clone()), cancelled: false },
-                            None,
-                        );
-                        return json_response(502, &json!({ "error": { "type": "ccproxy_upstream", "message": message } }));
-                    }
-                };
+        if !sse_stream {
+            let collected = match collect_stream(
+                head,
+                upstream_bytes,
+                Duration::from_millis(NON_STREAM_TIMEOUT_MS),
+            )
+            .await
+            {
+                Ok(bytes) => bytes,
+                Err(message) => {
+                    build_entry(
+                        ForwardOutcome { status_code: 502, error: Some(message.clone()), cancelled: false },
+                        None,
+                    );
+                    return json_response(
+                        502,
+                        &json!({ "error": { "type": "ccproxy_upstream", "message": format!("上游请求失败: {message}") } }),
+                    );
+                }
+            };
 
             let parsed = serde_json::from_slice::<Value>(&collected).ok();
             let client_value = match (parsed, converting_body) {
@@ -716,9 +805,14 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
             }) as Box<dyn FnOnce(ForwardOutcome) + Send>
         })));
         // 需要的字节流：透传时是上游原始 SSE，转换时是上游 SSE 经状态机吐出的客户端格式 SSE
-        let raw = upstream.bytes_stream();
+        // 窥探阶段读走的 head 要接回流头，保证转发内容与上游逐字节一致
+        let raw: UpstreamStream = if head.is_empty() {
+            upstream_bytes
+        } else {
+            Box::pin(stream::iter(head.into_iter().map(Ok::<Bytes, String>)).chain(upstream_bytes))
+        };
         let source: UpstreamStream = if converting_body {
-            let mapped = raw.map(|item| item.map_err(|error| convert_bridge::StreamError(error.to_string())));
+            let mapped = raw.map(|item| item.map_err(convert_bridge::StreamError));
             match convert_bridge::convert_stream(&protocol_id, &upstream_format, &original_request, mapped) {
                 Ok(converted) => Box::pin(converted.map(|item| item.map_err(|error| error.to_string()))),
                 Err(message) => {
@@ -748,12 +842,16 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
                 }
             }
         } else {
-            Box::pin(raw.map(|item| item.map_err(|error| error.to_string())))
+            raw
         };
         let body = Body::from_stream(make_stream(source, rewriter.clone(), hook, status));
         let mut builder = Response::builder().status(status);
         if let Some(headers_mut) = builder.headers_mut() {
             *headers_mut = passthrough_response_headers(&upstream_headers, rewriter.is_some());
+            // 靠正文才认出来的 SSE：上游没写 content-type，这里补一个，客户端才当流处理
+            if sse_stream && !headers_mut.contains_key("content-type") {
+                headers_mut.insert("content-type", HeaderValue::from_static("text/event-stream"));
+            }
         }
         return builder.body(body).unwrap_or_else(|_| Response::new(Body::empty()));
     }
