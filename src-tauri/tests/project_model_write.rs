@@ -50,3 +50,11 @@ fn codex_model_update_supports_existing_multiline_values() {
     assert!(after.contains("model = \"new\""));
     assert!(after.contains("multi_agent = true"));
 }
+
+#[test]
+fn codex_model_update_ignores_model_inside_an_array_table() {
+    let before = "[[tools]]\nmodel = \"nested\"\n";
+    let after = rewrite_codex_model(before, "top-level").unwrap();
+    assert!(after.starts_with("model = \"top-level\"\n"));
+    assert!(after.contains("[[tools]]\nmodel = \"nested\""));
+}

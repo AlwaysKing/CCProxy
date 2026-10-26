@@ -1,25 +1,18 @@
-// 项目模型的状态层：配置事务、开启/关闭和映射变化触发的同步范围。
+// 项目模型状态层：按协议添加、编辑、移除和映射变化同步。
 
 use serde_json::json;
 
-use ccproxy_lib::clients::project_models::ProjectSyncState;
+use ccproxy_lib::clients::project_models::{DiscoveredProject, ProjectSources};
 use ccproxy_lib::config::AppConfig;
 
 use common::{config_from, test_state, TempDir};
 
 mod common;
 
-fn routing_config(project: &TempDir, enabled: bool) -> AppConfig {
+fn routing_config(bindings: Vec<serde_json::Value>) -> AppConfig {
     config_from(json!({
         "settings": {
-            "projectModelSyncEnabled": enabled,
-            "projectModelProjects": [{
-                "id": "p1",
-                "path": project.path_string(),
-                "codexModel": "codex-a",
-                "manual": true,
-                "hidden": false
-            }]
+            "projectModelBindings": bindings
         },
         "providers": [{
             "id": "p1",
@@ -27,115 +20,255 @@ fn routing_config(project: &TempDir, enabled: bool) -> AppConfig {
             "enabled": true,
             "baseUrl": "https://example.com",
             "token": "sk-test",
-            "modelGroups": [{
-                "id": "g1",
-                "apiFormat": "openai",
-                "models": [{ "name": "real-codex" }]
-            }]
+            "modelGroups": [
+                {
+                    "id": "g-codex",
+                    "apiFormat": "openai",
+                    "models": [{ "name": "real-codex" }]
+                },
+                {
+                    "id": "g-claude",
+                    "apiFormat": "anthropic",
+                    "models": [{ "name": "real-claude" }]
+                }
+            ]
         }],
-        "protocols": [{
-            "id": "openai_responses",
-            "name": "OpenAI Responses",
-            "enabled": true,
-            "mappings": [{
-                "id": "m1",
+        "protocols": [
+            {
+                "id": "openai_responses",
+                "name": "OpenAI Responses",
                 "enabled": true,
-                "clientModel": "codex-a",
-                "providerId": "p1",
-                "modelGroupId": "g1",
-                "upstreamProtocol": "openai_responses",
-                "realModel": "real-codex"
-            }]
-        }]
+                "mappings": [{
+                    "id": "m1",
+                    "enabled": true,
+                    "clientModel": "codex-a",
+                    "providerId": "p1",
+                    "modelGroupId": "g-codex",
+                    "upstreamProtocol": "openai_responses",
+                    "realModel": "real-codex"
+                }]
+            },
+            {
+                "id": "anthropic",
+                "name": "Anthropic",
+                "enabled": true,
+                "mappings": [{
+                    "id": "m2",
+                    "enabled": true,
+                    "clientModel": "claude-a",
+                    "providerId": "p1",
+                    "modelGroupId": "g-claude",
+                    "upstreamProtocol": "anthropic",
+                    "realModel": "real-claude"
+                }]
+            }
+        ]
     }))
 }
 
-#[test]
-fn setting_a_project_model_immediately_writes_it() {
+fn candidate(path: &str, codex: bool, claude: bool) -> DiscoveredProject {
+    DiscoveredProject {
+        path: path.to_string(),
+        sources: ProjectSources { codex, claude },
+        last_activity_ms: Some(1),
+    }
+}
+
+#[tokio::test]
+async fn batch_add_creates_flat_bindings_and_writes_files() {
     let project = TempDir::new("ccproxy-state-project");
     let state_dir = TempDir::new("ccproxy-state-config");
-    let state = test_state(routing_config(&project, true), &state_dir);
+    let state = test_state(routing_config(Vec::new()), &state_dir);
+    let path = std::fs::canonicalize(&project.path)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    state.cache_project_candidates(vec![candidate(&path, true, false)]);
 
-    let result = state
-        .set_project_model(&project.path_string(), "codex", "codex-a")
+    state
+        .add_project_bindings("openai_responses", vec![path.clone()], "codex-a")
+        .await
         .unwrap();
-    assert_eq!(result.status, ProjectSyncState::Ok);
+
+    let bindings = state.config_snapshot().settings.project_model_bindings;
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].client, "codex");
     assert_eq!(
         std::fs::read_to_string(project.join(".codex/config.toml")).unwrap(),
         "model = \"codex-a\"\n"
     );
 }
 
-#[test]
-fn mapping_changes_rewrite_valid_bound_projects() {
+#[tokio::test]
+async fn adding_claude_to_the_same_path_is_a_separate_binding() {
     let project = TempDir::new("ccproxy-state-project");
     let state_dir = TempDir::new("ccproxy-state-config");
-    let state = test_state(routing_config(&project, true), &state_dir);
+    let state = test_state(routing_config(Vec::new()), &state_dir);
+    let path = std::fs::canonicalize(&project.path)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    state.cache_project_candidates(vec![candidate(&path, true, true)]);
+
     state
-        .set_project_model(&project.path_string(), "codex", "codex-a")
+        .add_project_bindings("openai_responses", vec![path.clone()], "codex-a")
+        .await
         .unwrap();
-    project.write(".codex/config.toml", "model = \"manual\"\n");
+    state
+        .add_project_bindings("anthropic", vec![path], "claude-a")
+        .await
+        .unwrap();
+
+    let bindings = state.config_snapshot().settings.project_model_bindings;
+    assert_eq!(bindings.len(), 2);
+    assert!(bindings.iter().any(|binding| binding.client == "codex"));
+    assert!(bindings.iter().any(|binding| binding.client == "claude"));
+}
+
+#[tokio::test]
+async fn changing_a_binding_model_rewrites_only_that_project() {
+    let first = TempDir::new("ccproxy-state-first");
+    let second = TempDir::new("ccproxy-state-second");
+    let state_dir = TempDir::new("ccproxy-state-config");
+    let config = routing_config(vec![json!({
+        "id": "b1",
+        "path": first.path_string(),
+        "client": "codex",
+        "model": "codex-a"
+    })]);
+    let state = test_state(config, &state_dir);
+    let first_path = std::fs::canonicalize(&first.path)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let second_path = std::fs::canonicalize(&second.path)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    state.cache_project_candidates(vec![
+        candidate(&first_path, true, false),
+        candidate(&second_path, true, false),
+    ]);
+    state
+        .add_project_bindings("openai_responses", vec![second_path], "codex-a")
+        .await
+        .unwrap();
 
     let mut next = state.config_snapshot();
     next.protocols
         .iter_mut()
         .find(|protocol| protocol.id == "openai_responses")
         .unwrap()
-        .mappings[0]
-        .real_model = "real-codex-v2".to_string();
+        .mappings
+        .push(
+            serde_json::from_value(json!({
+                "id": "m3",
+                "enabled": true,
+                "clientModel": "codex-b",
+                "providerId": "p1",
+                "modelGroupId": "g-codex",
+                "upstreamProtocol": "openai_responses",
+                "realModel": "real-codex"
+            }))
+            .unwrap(),
+        );
     state
         .apply_config(&serde_json::to_value(next).unwrap())
         .unwrap();
-    assert!(std::fs::read_to_string(project.join(".codex/config.toml"))
+    state
+        .set_project_binding_model("openai_responses", "b1", "codex-b")
+        .unwrap();
+
+    assert!(std::fs::read_to_string(first.join(".codex/config.toml"))
+        .unwrap()
+        .contains("codex-b"));
+    assert!(std::fs::read_to_string(second.join(".codex/config.toml"))
         .unwrap()
         .contains("codex-a"));
 }
 
-#[test]
-fn disabling_project_sync_stops_followup_writes() {
+#[tokio::test]
+async fn removing_a_binding_keeps_the_project_file() {
     let project = TempDir::new("ccproxy-state-project");
     let state_dir = TempDir::new("ccproxy-state-config");
-    let state = test_state(routing_config(&project, true), &state_dir);
-    state
-        .set_project_model(&project.path_string(), "codex", "codex-a")
-        .unwrap();
-    project.write(".codex/config.toml", "model = \"manual\"\n");
-    state.set_project_sync_enabled(false).unwrap();
-
-    let mut next = state.config_snapshot();
-    next.protocols
-        .iter_mut()
-        .find(|protocol| protocol.id == "openai_responses")
+    let config = routing_config(Vec::new());
+    let state = test_state(config, &state_dir);
+    let path = std::fs::canonicalize(&project.path)
         .unwrap()
-        .mappings[0]
-        .client_model = "codex-b".to_string();
-    next.settings.project_model_projects[0].codex_model = Some("codex-b".to_string());
+        .to_string_lossy()
+        .to_string();
+    state.cache_project_candidates(vec![candidate(&path, true, false)]);
     state
-        .apply_config(&serde_json::to_value(next).unwrap())
+        .add_project_bindings("openai_responses", vec![path], "codex-a")
+        .await
         .unwrap();
-    assert_eq!(
-        std::fs::read_to_string(project.join(".codex/config.toml")).unwrap(),
-        "model = \"manual\"\n"
-    );
+    assert!(project.join(".codex/config.toml").exists());
+    let id = state.config_snapshot().settings.project_model_bindings[0]
+        .id
+        .clone();
+
+    state
+        .remove_project_binding("openai_responses", &id)
+        .unwrap();
+    assert!(state
+        .config_snapshot()
+        .settings
+        .project_model_bindings
+        .is_empty());
+    assert!(project.join(".codex/config.toml").exists());
 }
 
-#[test]
-fn enabling_project_sync_writes_existing_bindings() {
-    let project = TempDir::new("ccproxy-state-project");
+#[tokio::test]
+async fn candidate_lists_are_filtered_by_protocol() {
+    let codex_project = TempDir::new("ccproxy-candidate-codex");
+    let claude_project = TempDir::new("ccproxy-candidate-claude");
     let state_dir = TempDir::new("ccproxy-state-config");
-    let state = test_state(routing_config(&project, false), &state_dir);
-    assert!(!project.join(".codex/config.toml").exists());
+    let state = test_state(routing_config(Vec::new()), &state_dir);
+    let codex_path = std::fs::canonicalize(&codex_project.path)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let claude_path = std::fs::canonicalize(&claude_project.path)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    state.cache_project_candidates(vec![
+        candidate(&codex_path, true, false),
+        candidate(&claude_path, false, true),
+    ]);
 
-    state.set_project_sync_enabled(true).unwrap();
-    assert_eq!(
-        std::fs::read_to_string(project.join(".codex/config.toml")).unwrap(),
-        "model = \"codex-a\"\n"
-    );
+    let codex = state
+        .project_models_view("openai_responses", false)
+        .await
+        .unwrap();
+    let claude = state.project_models_view("anthropic", false).await.unwrap();
+    assert_eq!(codex.directory_candidates, vec![codex_path]);
+    assert_eq!(claude.directory_candidates, vec![claude_path]);
+    assert_eq!(codex.model_candidates, vec!["codex-a"]);
+    assert_eq!(claude.model_candidates, vec!["claude-a"]);
 }
 
-#[test]
-fn two_projects_cannot_bind_the_same_claude_settings_file() {
-    let repo = TempDir::new("ccproxy-state-claude-repo");
+#[tokio::test]
+async fn add_rejects_a_candidate_from_the_other_client() {
+    let project = TempDir::new("ccproxy-candidate-wrong-client");
+    let state_dir = TempDir::new("ccproxy-state-config");
+    let state = test_state(routing_config(Vec::new()), &state_dir);
+    let path = std::fs::canonicalize(&project.path)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    state.cache_project_candidates(vec![candidate(&path, true, false)]);
+
+    let error = state
+        .add_project_bindings("anthropic", vec![path], "claude-a")
+        .await
+        .unwrap_err();
+    assert!(error.contains("不在当前客户端的会话候选"));
+}
+
+#[tokio::test]
+async fn two_claude_candidates_cannot_share_a_settings_file() {
+    let repo = TempDir::new("ccproxy-claude-candidates-repo");
     std::process::Command::new("git")
         .args(["init", "-q"])
         .current_dir(&repo.path)
@@ -145,66 +278,28 @@ fn two_projects_cannot_bind_the_same_claude_settings_file() {
     let second = repo.join("second");
     std::fs::create_dir_all(&first).unwrap();
     std::fs::create_dir_all(&second).unwrap();
-    let config = config_from(json!({
-        "settings": {
-            "projectModelSyncEnabled": true,
-            "projectModelProjects": [
-                {
-                    "id": "p1",
-                    "path": first.to_string_lossy(),
-                    "claudeModel": "claude-a",
-                    "manual": true
-                },
-                {
-                    "id": "p2",
-                    "path": second.to_string_lossy(),
-                    "claudeModel": null,
-                    "manual": true
-                }
-            ]
-        },
-        "providers": [{
-            "id": "p1",
-            "name": "provider",
-            "enabled": true,
-            "baseUrl": "https://example.com",
-            "token": "sk-test",
-            "modelGroups": [{
-                "id": "g1",
-                "apiFormat": "anthropic",
-                "models": [{ "name": "real-claude" }]
-            }]
-        }],
-        "protocols": [{
-            "id": "anthropic",
-            "name": "Anthropic",
-            "enabled": true,
-            "mappings": [{
-                "id": "m1",
-                "enabled": true,
-                "clientModel": "claude-a",
-                "providerId": "p1",
-                "modelGroupId": "g1",
-                "upstreamProtocol": "anthropic",
-                "realModel": "real-claude"
-            }]
-        }]
-    }));
+    let first = std::fs::canonicalize(first)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let second = std::fs::canonicalize(second)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     let state_dir = TempDir::new("ccproxy-state-config");
-    let state = test_state(config, &state_dir);
-    state
-        .set_project_model(&first.to_string_lossy(), "claude", "claude-a")
-        .unwrap();
+    let state = test_state(routing_config(Vec::new()), &state_dir);
+    state.cache_project_candidates(vec![
+        candidate(&first, false, true),
+        candidate(&second, false, true),
+    ]);
 
+    state
+        .add_project_bindings("anthropic", vec![first], "claude-a")
+        .await
+        .unwrap();
     let error = state
-        .set_project_model(&second.to_string_lossy(), "claude", "claude-a")
+        .add_project_bindings("anthropic", vec![second], "claude-a")
+        .await
         .unwrap_err();
-    assert!(error.contains("同一个 Claude"));
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(
-            &std::fs::read_to_string(repo.join(".claude/settings.local.json")).unwrap()
-        )
-        .unwrap(),
-        json!({ "model": "claude-a" })
-    );
+    assert!(error.contains("共用 settings.local.json"));
 }

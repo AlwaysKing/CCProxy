@@ -237,6 +237,12 @@ fn missing_project_is_reported_without_creating_directories() {
 }
 
 #[test]
+fn filesystem_root_cannot_be_used_as_a_project() {
+    let result = apply_project_model(&routing_config(), "/", "codex", "codex-alias");
+    assert_eq!(result.status, ProjectSyncState::BindingInvalid);
+}
+
+#[test]
 fn claude_uses_the_git_root_for_a_nested_working_directory() {
     let repo = TempDir::new("ccproxy-project-repo");
     std::process::Command::new("git")

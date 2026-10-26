@@ -40,7 +40,7 @@ fn first_run_returns_defaults() {
 }
 
 #[test]
-fn project_model_settings_default_off_and_keep_offline_paths() {
+fn legacy_project_models_expand_to_flat_bindings_and_keep_offline_paths() {
     let result = validate_config(&json!({
         "version": 5,
         "settings": {
@@ -56,62 +56,57 @@ fn project_model_settings_default_off_and_keep_offline_paths() {
     }));
     let config = result.config.unwrap();
     assert_eq!(config.version, 6);
-    assert!(!config.settings.project_model_sync_enabled);
-    assert_eq!(config.settings.project_model_projects.len(), 1);
+    assert_eq!(config.settings.project_model_bindings.len(), 2);
     assert_eq!(
-        config.settings.project_model_projects[0].path,
+        config.settings.project_model_bindings[0].path,
         "/tmp/ccproxy-project-that-does-not-need-to-exist"
     );
+    assert_eq!(config.settings.project_model_bindings[0].client, "codex");
+    assert_eq!(config.settings.project_model_bindings[1].client, "claude");
 }
 
 #[test]
 fn project_model_paths_and_ids_are_normalized() {
     let result = validate_config(&json!({
         "settings": {
-            "projectModelSyncEnabled": true,
-            "projectModelProjects": [
+            "projectModelBindings": [
                 {
                     "id": "same",
                     "path": "/tmp/project-a",
-                    "codexModel": "m1",
-                    "claudeModel": 7,
-                    "manual": true,
-                    "hidden": false
+                    "client": "codex",
+                    "model": "m1"
                 },
                 {
                     "id": "same",
                     "path": "/tmp/project-b",
-                    "codexModel": "",
-                    "claudeModel": "m2",
-                    "manual": false,
-                    "hidden": true
+                    "client": "claude",
+                    "model": "m2"
                 },
                 {
                     "id": "duplicate-path",
                     "path": "/tmp/project-a/",
-                    "codexModel": "m3",
-                    "manual": true
+                    "client": "codex",
+                    "model": "m3"
                 }
             ]
         }
     }));
     let config = result.config.unwrap();
-    let projects = config.settings.project_model_projects;
-    assert!(config.settings.project_model_sync_enabled);
-    assert_eq!(projects.len(), 2);
-    assert_eq!(projects[0].path, "/tmp/project-a");
-    assert_eq!(projects[0].codex_model.as_deref(), Some("m1"));
-    assert_eq!(projects[0].claude_model, None);
-    assert_eq!(projects[1].path, "/tmp/project-b");
-    assert_ne!(projects[0].id, projects[1].id);
+    let bindings = config.settings.project_model_bindings;
+    assert_eq!(bindings.len(), 2);
+    assert_eq!(bindings[0].path, "/tmp/project-a");
+    assert_eq!(bindings[0].client, "codex");
+    assert_eq!(bindings[0].model, "m1");
+    assert_eq!(bindings[1].path, "/tmp/project-b");
+    assert_ne!(bindings[0].id, bindings[1].id);
     assert!(result
         .issues
         .iter()
-        .any(|issue| issue.contains("重复的项目目录")));
+        .any(|issue| issue.contains("重复的项目绑定")));
     assert!(result
         .issues
         .iter()
-        .any(|issue| issue.contains("重复的项目 id")));
+        .any(|issue| issue.contains("重复的项目绑定 id")));
 }
 
 #[test]

@@ -1,24 +1,55 @@
-// 项目模型状态层：配置事务、运行时同步状态和项目级 Tauri 操作。
+// 项目模型状态层：候选缓存、按协议的绑定事务以及文件同步。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde::Serialize;
 use serde_json::json;
 
-use super::{AppState, ProjectModelRow, ProjectModelsView, ProjectSyncStatusSnapshot};
+use super::{AppState, ProjectSyncStatusSnapshot};
 use crate::clients::project_models::{
-    apply_project_model, claude_settings_root, discover_default_projects, merge_project_list,
-    project_model_candidates, ProjectSyncResult, ProjectSyncState,
+    apply_project_model, claude_settings_root, codex_project_trust, discover_default_projects,
+    discovery_candidates, project_binding_list, project_model_candidates, DiscoveredProject,
+    ProjectBindingListItem, ProjectSyncResult, ProjectSyncState,
 };
-use crate::config::{create_config_id, AppConfig, ProjectModelProject};
+use crate::config::{create_config_id, AppConfig, ProjectModelBinding};
 use crate::logger;
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectModelRow {
+    #[serde(flatten)]
+    pub binding: ProjectBindingListItem,
+    pub status: Option<ProjectSyncStatusSnapshot>,
+    pub codex_trusted: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectModelsView {
+    pub protocol: String,
+    pub client: String,
+    pub title: String,
+    pub projects: Vec<ProjectModelRow>,
+    pub model_candidates: Vec<String>,
+    pub directory_candidates: Vec<String>,
+    pub codex_daemon: Option<crate::clients::daemon::CodexDaemon>,
+}
 
 fn codex_home() -> PathBuf {
     std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
         .unwrap_or_else(|| PathBuf::from(".codex"))
+}
+
+fn client_for_protocol(protocol: &str) -> Option<(&'static str, &'static str)> {
+    match protocol {
+        "anthropic" => Some(("claude", "Claude")),
+        "openai_responses" => Some(("codex", "Codex")),
+        _ => None,
+    }
 }
 
 fn same_project_path(left: &str, right: &str) -> bool {
@@ -31,6 +62,11 @@ fn same_project_path(left: &str, right: &str) -> bool {
     }
 }
 
+fn claude_root(path: &str) -> PathBuf {
+    let root = claude_settings_root(path);
+    std::fs::canonicalize(&root).unwrap_or(root)
+}
+
 impl AppState {
     fn codex_daemon(&self) -> Option<crate::clients::daemon::CodexDaemon> {
         self.handle()?;
@@ -41,69 +77,52 @@ impl AppState {
 
     fn record_project_sync(
         &self,
-        project_id: &str,
+        binding_id: &str,
         client: &str,
         result: ProjectSyncResult,
         daemon_pid: Option<u32>,
+        codex_trusted: Option<bool>,
     ) {
         let mut status = result.status.clone();
         let mut message = result.message.clone();
-        if status == ProjectSyncState::Ok && client == "codex" && daemon_pid.is_some() {
-            status = ProjectSyncState::RestartRequired;
-            message =
-                Some("Codex app-server daemon 正在运行，重启后才会读取新的项目模型".to_string());
+        if status == ProjectSyncState::Ok && client == "codex" {
+            if codex_trusted != Some(true) {
+                status = ProjectSyncState::RequiresProjectTrust;
+                message = Some("Codex 只会加载受信任项目的 config.toml".to_string());
+            } else if daemon_pid.is_some() {
+                status = ProjectSyncState::RestartRequired;
+                message = Some(
+                    "Codex app-server daemon 正在运行，重启后才会读取新的项目模型".to_string(),
+                );
+            }
         }
-        let snapshot = ProjectSyncStatusSnapshot {
-            status,
-            message,
-            file: result.file,
-            changed: result.changed,
-            synced_at_ms: crate::now_ms(),
-            daemon_pid,
-        };
         if let Ok(mut statuses) = self.project_sync_status.write() {
-            statuses.insert((project_id.to_string(), client.to_string()), snapshot);
+            statuses.insert(
+                binding_id.to_string(),
+                ProjectSyncStatusSnapshot {
+                    status,
+                    message,
+                    file: result.file,
+                    changed: result.changed,
+                    synced_at_ms: crate::now_ms(),
+                    daemon_pid,
+                },
+            );
         }
     }
 
     pub(super) fn sync_all_project_models_locked(self: &Arc<Self>, config: &AppConfig) {
-        if !config.settings.project_model_sync_enabled {
-            return;
-        }
         let daemon_pid = self
             .codex_daemon()
             .filter(|daemon| daemon.running)
             .and_then(|daemon| daemon.pid);
         let mut claude_roots: HashMap<PathBuf, String> = HashMap::new();
-        for project in &config.settings.project_model_projects {
-            if let Some(model) = project
-                .codex_model
-                .as_deref()
-                .filter(|model| !model.is_empty())
-            {
-                let result = apply_project_model(config, &project.path, "codex", model);
-                if result.status != ProjectSyncState::Ok {
-                    logger::warn(
-                        "[ProjectModels] Codex 同步未完成",
-                        Some(&json!({
-                            "project": project.path,
-                            "status": result.status,
-                            "message": result.message
-                        })),
-                    );
-                }
-                self.record_project_sync(&project.id, "codex", result, daemon_pid);
-            }
-            if let Some(model) = project
-                .claude_model
-                .as_deref()
-                .filter(|model| !model.is_empty())
-            {
-                let root = std::fs::canonicalize(claude_settings_root(&project.path))
-                    .unwrap_or_else(|_| claude_settings_root(&project.path));
+        for binding in &config.settings.project_model_bindings {
+            if binding.client == "claude" {
+                let root = claude_root(&binding.path);
                 if let Some(owner) = claude_roots.get(&root) {
                     self.record_project_sync(
-                        &project.id,
+                        &binding.id,
                         "claude",
                         ProjectSyncResult {
                             status: ProjectSyncState::BindingInvalid,
@@ -114,45 +133,48 @@ impl AppState {
                             )),
                         },
                         None,
+                        None,
                     );
                     continue;
                 }
-                claude_roots.insert(root, project.path.clone());
-                let result = apply_project_model(config, &project.path, "claude", model);
-                if result.status != ProjectSyncState::Ok {
-                    logger::warn(
-                        "[ProjectModels] Claude 同步未完成",
-                        Some(&json!({
-                            "project": project.path,
-                            "status": result.status,
-                            "message": result.message
-                        })),
-                    );
-                }
-                self.record_project_sync(&project.id, "claude", result, None);
+                claude_roots.insert(root, binding.path.clone());
             }
+            let codex_trusted = (binding.client == "codex" && self.handle().is_some())
+                .then(|| codex_project_trust(&binding.path, &codex_home()))
+                .flatten();
+            let result =
+                apply_project_model(config, &binding.path, &binding.client, &binding.model);
+            if result.status != ProjectSyncState::Ok {
+                logger::warn(
+                    "[ProjectModels] 同步未完成",
+                    Some(&json!({
+                        "project": binding.path,
+                        "client": binding.client,
+                        "status": result.status,
+                        "message": result.message
+                    })),
+                );
+            }
+            self.record_project_sync(
+                &binding.id,
+                &binding.client,
+                result,
+                (binding.client == "codex").then_some(daemon_pid).flatten(),
+                codex_trusted,
+            );
         }
-
         if let Ok(mut statuses) = self.project_sync_status.write() {
-            statuses.retain(|(project_id, client), _| {
-                config
-                    .settings
-                    .project_model_projects
-                    .iter()
-                    .find(|project| project.id == *project_id)
-                    .is_some_and(|project| match client.as_str() {
-                        "codex" => project.codex_model.is_some(),
-                        "claude" => project.claude_model.is_some(),
-                        _ => false,
-                    })
-            });
+            let ids: HashSet<&str> = config
+                .settings
+                .project_model_bindings
+                .iter()
+                .map(|binding| binding.id.as_str())
+                .collect();
+            statuses.retain(|id, _| ids.contains(id.as_str()));
         }
         self.emit(
             "project-models-changed",
-            &json!({
-                "enabled": config.settings.project_model_sync_enabled,
-                "syncedAt": crate::now_ms()
-            }),
+            &json!({ "syncedAt": crate::now_ms() }),
         );
     }
 
@@ -161,11 +183,10 @@ impl AppState {
             return;
         };
         if let Ok(mut statuses) = self.project_sync_status.write() {
-            for ((_, client), status) in statuses.iter_mut() {
-                if client != "codex" || status.status != ProjectSyncState::RestartRequired {
-                    continue;
-                }
-                if !daemon.running || daemon.pid != status.daemon_pid {
+            for status in statuses.values_mut() {
+                if status.status == ProjectSyncState::RestartRequired
+                    && (!daemon.running || daemon.pid != status.daemon_pid)
+                {
                     status.status = ProjectSyncState::Ok;
                     status.message = None;
                     status.daemon_pid = None;
@@ -174,42 +195,97 @@ impl AppState {
         }
     }
 
-    pub fn project_models_view(self: &Arc<Self>) -> ProjectModelsView {
+    pub async fn ensure_project_candidates(
+        self: &Arc<Self>,
+        refresh: bool,
+    ) -> Vec<DiscoveredProject> {
+        if !refresh {
+            if let Ok(cache) = self.project_candidates.read() {
+                if let Some(projects) = cache.as_ref() {
+                    return projects.clone();
+                }
+            }
+        }
+        let _guard = self.project_candidates_scan.lock().await;
+        if !refresh {
+            if let Ok(cache) = self.project_candidates.read() {
+                if let Some(projects) = cache.as_ref() {
+                    return projects.clone();
+                }
+            }
+        }
+        let projects = tokio::task::spawn_blocking(discover_default_projects)
+            .await
+            .unwrap_or_default();
+        if let Ok(mut cache) = self.project_candidates.write() {
+            *cache = Some(projects.clone());
+        }
+        projects
+    }
+
+    pub fn prime_project_candidates(self: &Arc<Self>) {
+        let state = self.clone();
+        tauri::async_runtime::spawn(async move {
+            state.ensure_project_candidates(true).await;
+        });
+    }
+
+    pub fn cache_project_candidates(&self, projects: Vec<DiscoveredProject>) {
+        if let Ok(mut cache) = self.project_candidates.write() {
+            *cache = Some(projects);
+        }
+    }
+
+    pub async fn project_models_view(
+        self: &Arc<Self>,
+        protocol: &str,
+        refresh: bool,
+    ) -> Result<ProjectModelsView, String> {
+        let (client, title) =
+            client_for_protocol(protocol).ok_or_else(|| "该协议不支持项目默认模型".to_string())?;
         self.refresh_restart_required();
         let config = self.config_snapshot();
-        let discovered = if config.settings.project_model_sync_enabled {
-            discover_default_projects()
-        } else {
-            Vec::new()
-        };
-        let projects = merge_project_list(&config, discovered);
+        let discovered = self.ensure_project_candidates(refresh).await;
         let statuses = self
             .project_sync_status
             .read()
             .map(|value| value.clone())
             .unwrap_or_default();
-        let projects = projects
+        let projects = project_binding_list(&config, client)
             .into_iter()
-            .map(|project| ProjectModelRow {
-                codex_status: statuses
-                    .get(&(project.id.clone(), "codex".to_string()))
-                    .cloned(),
-                claude_status: statuses
-                    .get(&(project.id.clone(), "claude".to_string()))
-                    .cloned(),
-                project,
+            .map(|binding| {
+                let codex_trusted = (client == "codex" && self.handle().is_some())
+                    .then(|| codex_project_trust(&binding.path, &codex_home()))
+                    .flatten();
+                let mut status = statuses.get(&binding.id).cloned();
+                if codex_trusted == Some(true) {
+                    if let Some(current) = status.as_mut() {
+                        if current.status == ProjectSyncState::RequiresProjectTrust {
+                            current.status = ProjectSyncState::Ok;
+                            current.message = None;
+                        }
+                    }
+                }
+                ProjectModelRow {
+                    codex_trusted,
+                    status,
+                    binding,
+                }
             })
             .collect();
-        ProjectModelsView {
-            enabled: config.settings.project_model_sync_enabled,
-            candidates: project_model_candidates(&config),
+        let model_candidates = match client {
+            "codex" => project_model_candidates(&config).codex,
+            _ => project_model_candidates(&config).claude,
+        };
+        Ok(ProjectModelsView {
+            protocol: protocol.to_string(),
+            client: client.to_string(),
+            title: format!("项目默认模型 · {title}"),
             projects,
-            codex_daemon: if config.settings.project_model_sync_enabled {
-                self.codex_daemon()
-            } else {
-                None
-            },
-        }
+            model_candidates,
+            directory_candidates: discovery_candidates(&discovered, client),
+            codex_daemon: (client == "codex").then(|| self.codex_daemon()).flatten(),
+        })
     }
 
     fn save_project_draft_locked(self: &Arc<Self>, draft: &AppConfig) -> Result<AppConfig, String> {
@@ -217,234 +293,129 @@ impl AppState {
         self.apply_config_locked(&value).map(|(config, _)| config)
     }
 
-    pub fn set_project_sync_enabled(self: &Arc<Self>, enabled: bool) -> Result<AppConfig, String> {
-        let _guard = self
-            .config_transaction
-            .lock()
-            .map_err(|_| "配置事务锁不可用".to_string())?;
-        let mut draft = self.config_snapshot();
-        draft.settings.project_model_sync_enabled = enabled;
-        self.save_project_draft_locked(&draft)
-    }
-
-    pub fn add_project_dir(self: &Arc<Self>, path: &str) -> Result<(), String> {
-        let _guard = self
-            .config_transaction
-            .lock()
-            .map_err(|_| "配置事务锁不可用".to_string())?;
-        let target =
-            std::fs::canonicalize(path).map_err(|error| format!("项目目录不可用：{error}"))?;
-        if !target.is_dir() {
-            return Err("选择的路径不是目录".to_string());
-        }
-        let target = target.to_string_lossy().to_string();
-        let mut draft = self.config_snapshot();
-        if draft
-            .settings
-            .project_model_projects
-            .iter()
-            .any(|project| same_project_path(&project.path, &target))
-        {
-            return Ok(());
-        }
-        let known = discover_default_projects()
-            .iter()
-            .any(|project| same_project_path(&project.path, &target));
-        draft
-            .settings
-            .project_model_projects
-            .push(ProjectModelProject {
-                id: create_config_id("p"),
-                path: target,
-                codex_model: None,
-                claude_model: None,
-                manual: !known,
-                hidden: false,
-            });
-        self.save_project_draft_locked(&draft)?;
-        Ok(())
-    }
-
-    pub fn set_project_model(
+    pub async fn add_project_bindings(
         self: &Arc<Self>,
-        path: &str,
-        client: &str,
+        protocol: &str,
+        paths: Vec<String>,
         model: &str,
-    ) -> Result<ProjectSyncStatusSnapshot, String> {
-        if client != "codex" && client != "claude" {
-            return Err("未知的客户端类型".to_string());
+    ) -> Result<(), String> {
+        let (client, _) =
+            client_for_protocol(protocol).ok_or_else(|| "该协议不支持项目默认模型".to_string())?;
+        let model = model.trim();
+        if model.is_empty() || model.contains('*') {
+            return Err("请选择一个精确的默认模型".to_string());
         }
+        let candidates = self.ensure_project_candidates(false).await;
+        let allowed: HashSet<String> = discovery_candidates(&candidates, client)
+            .into_iter()
+            .collect();
         let _guard = self
             .config_transaction
             .lock()
             .map_err(|_| "配置事务锁不可用".to_string())?;
-        let target = std::fs::canonicalize(path)
-            .unwrap_or_else(|_| PathBuf::from(path))
-            .to_string_lossy()
-            .to_string();
         let mut draft = self.config_snapshot();
-        let index = draft
-            .settings
-            .project_model_projects
-            .iter()
-            .position(|project| same_project_path(&project.path, &target));
-        let index = match index {
-            Some(index) => index,
-            None => {
-                if !discover_default_projects()
-                    .iter()
-                    .any(|project| same_project_path(&project.path, &target))
-                {
-                    return Err("项目目录不在自动发现或手动添加列表中".to_string());
-                }
-                draft
-                    .settings
-                    .project_model_projects
-                    .push(ProjectModelProject {
-                        id: create_config_id("p"),
-                        path: target,
-                        codex_model: None,
-                        claude_model: None,
-                        manual: false,
-                        hidden: false,
-                    });
-                draft.settings.project_model_projects.len() - 1
-            }
+        let candidates = project_model_candidates(&draft);
+        let models = if client == "codex" {
+            &candidates.codex
+        } else {
+            &candidates.claude
         };
-        let value = model.trim();
-        let value = (!value.is_empty()).then(|| value.to_string());
-        if client == "claude" && value.is_some() {
-            let target_root =
-                claude_settings_root(&draft.settings.project_model_projects[index].path);
-            let target_root = std::fs::canonicalize(&target_root).unwrap_or(target_root);
-            if let Some(owner) = draft
-                .settings
-                .project_model_projects
-                .iter()
-                .find(|project| {
-                    project.id != draft.settings.project_model_projects[index].id
-                        && project.claude_model.is_some()
-                        && {
-                            let root = claude_settings_root(&project.path);
-                            std::fs::canonicalize(&root).unwrap_or(root) == target_root
-                        }
-                })
-            {
-                return Err(format!(
-                    "项目 {} 与 {} 使用同一个 Claude settings.local.json，请先清除另一个项目的 Claude 绑定",
-                    draft.settings.project_model_projects[index].path, owner.path
-                ));
+        if !models.iter().any(|candidate| candidate == model) {
+            return Err(format!("模型 {model} 不在当前协议的精确候选里"));
+        }
+        for raw_path in paths {
+            let path = std::fs::canonicalize(raw_path.trim())
+                .map_err(|error| format!("项目目录不可用：{error}"))?;
+            let path = path.to_string_lossy().to_string();
+            if !allowed.contains(&path) {
+                return Err(format!("{path} 不在当前客户端的会话候选里"));
             }
-        }
-        if client == "codex" {
-            draft.settings.project_model_projects[index].codex_model = value;
-        } else {
-            draft.settings.project_model_projects[index].claude_model = value;
-        }
-        let project_id = draft.settings.project_model_projects[index].id.clone();
-        let config = self.save_project_draft_locked(&draft)?;
-        // 改变绑定会走配置副作用同步；只有内容完全相同、没有触发副作用时才补一次。
-        let has_status = self
-            .project_sync_status
-            .read()
-            .is_ok_and(|statuses| statuses.contains_key(&(project_id.clone(), client.to_string())));
-        if !has_status {
-            self.sync_all_project_models_locked(&config);
-        }
-        if let Some(status) = self
-            .project_sync_status
-            .read()
-            .ok()
-            .and_then(|statuses| statuses.get(&(project_id, client.to_string())).cloned())
-        {
-            return Ok(status);
-        }
-        Ok(ProjectSyncStatusSnapshot {
-            status: if config.settings.project_model_sync_enabled {
-                ProjectSyncState::Ok
-            } else {
-                ProjectSyncState::SyncDisabled
-            },
-            message: (!config.settings.project_model_sync_enabled)
-                .then(|| "项目模型同步已关闭".to_string()),
-            file: None,
-            changed: false,
-            synced_at_ms: crate::now_ms(),
-            daemon_pid: None,
-        })
-    }
-
-    pub fn set_project_hidden(self: &Arc<Self>, path: &str, hidden: bool) -> Result<(), String> {
-        let _guard = self
-            .config_transaction
-            .lock()
-            .map_err(|_| "配置事务锁不可用".to_string())?;
-        let mut draft = self.config_snapshot();
-        if let Some(project) = draft
-            .settings
-            .project_model_projects
-            .iter_mut()
-            .find(|project| same_project_path(&project.path, path))
-        {
-            project.hidden = hidden;
-        } else {
-            let target =
-                std::fs::canonicalize(path).map_err(|error| format!("项目目录不可用：{error}"))?;
-            if !discover_default_projects()
+            if draft
+                .settings
+                .project_model_bindings
                 .iter()
-                .any(|project| same_project_path(&project.path, &target.to_string_lossy()))
+                .any(|binding| binding.client == client && same_project_path(&binding.path, &path))
             {
-                return Err("项目目录不在自动发现或手动添加列表中".to_string());
+                continue;
+            }
+            if client == "claude" {
+                let root = claude_root(&path);
+                if draft
+                    .settings
+                    .project_model_bindings
+                    .iter()
+                    .any(|binding| binding.client == "claude" && claude_root(&binding.path) == root)
+                {
+                    return Err(format!("{path} 与已有 Claude 项目共用 settings.local.json"));
+                }
             }
             draft
                 .settings
-                .project_model_projects
-                .push(ProjectModelProject {
-                    id: create_config_id("p"),
-                    path: target.to_string_lossy().to_string(),
-                    codex_model: None,
-                    claude_model: None,
-                    manual: false,
-                    hidden,
+                .project_model_bindings
+                .push(ProjectModelBinding {
+                    id: create_config_id("b"),
+                    path,
+                    client: client.to_string(),
+                    model: model.to_string(),
                 });
         }
         self.save_project_draft_locked(&draft)?;
         Ok(())
     }
 
-    pub fn remove_project(self: &Arc<Self>, path: &str) -> Result<(), String> {
+    pub fn set_project_binding_model(
+        self: &Arc<Self>,
+        protocol: &str,
+        binding_id: &str,
+        model: &str,
+    ) -> Result<(), String> {
+        let (client, _) =
+            client_for_protocol(protocol).ok_or_else(|| "该协议不支持项目默认模型".to_string())?;
+        let model = model.trim();
+        if model.is_empty() || model.contains('*') {
+            return Err("请选择一个精确的默认模型".to_string());
+        }
         let _guard = self
             .config_transaction
             .lock()
             .map_err(|_| "配置事务锁不可用".to_string())?;
         let mut draft = self.config_snapshot();
-        let project = draft
+        let index = draft
             .settings
-            .project_model_projects
+            .project_model_bindings
             .iter()
-            .find(|project| same_project_path(&project.path, path))
-            .cloned();
-        if let Some(project) = project {
-            if project.manual || project.hidden {
-                draft
-                    .settings
-                    .project_model_projects
-                    .retain(|item| item.id != project.id);
-            } else {
-                for item in &mut draft.settings.project_model_projects {
-                    if item.id == project.id {
-                        item.codex_model = None;
-                        item.claude_model = None;
-                    }
-                }
-                draft.settings.project_model_projects.retain(|item| {
-                    item.codex_model.is_some()
-                        || item.claude_model.is_some()
-                        || item.manual
-                        || item.hidden
-                });
-            }
+            .position(|binding| binding.id == binding_id && binding.client == client)
+            .ok_or_else(|| "项目绑定不存在".to_string())?;
+        let candidates = project_model_candidates(&draft);
+        let models = if client == "codex" {
+            &candidates.codex
+        } else {
+            &candidates.claude
+        };
+        if !models.iter().any(|candidate| candidate == model) {
+            return Err(format!("模型 {model} 不在当前协议的精确候选里"));
         }
+        draft.settings.project_model_bindings[index].model = model.to_string();
+        self.save_project_draft_locked(&draft)?;
+        Ok(())
+    }
+
+    pub fn remove_project_binding(
+        self: &Arc<Self>,
+        protocol: &str,
+        binding_id: &str,
+    ) -> Result<(), String> {
+        let (client, _) =
+            client_for_protocol(protocol).ok_or_else(|| "该协议不支持项目默认模型".to_string())?;
+        let _guard = self
+            .config_transaction
+            .lock()
+            .map_err(|_| "配置事务锁不可用".to_string())?;
+        let mut draft = self.config_snapshot();
+        draft
+            .settings
+            .project_model_bindings
+            .retain(|binding| !(binding.id == binding_id && binding.client == client));
         self.save_project_draft_locked(&draft)?;
         Ok(())
     }

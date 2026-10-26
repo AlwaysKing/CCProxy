@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::UNIX_EPOCH;
@@ -33,15 +33,11 @@ pub struct DiscoveredProject {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ProjectListItem {
+pub struct ProjectBindingListItem {
     pub id: String,
     pub path: String,
-    pub codex_model: Option<String>,
-    pub claude_model: Option<String>,
-    pub manual: bool,
-    pub hidden: bool,
-    pub sources: ProjectSources,
-    pub last_activity_ms: Option<i64>,
+    pub client: String,
+    pub model: String,
     pub missing: bool,
 }
 
@@ -62,6 +58,7 @@ pub enum ProjectSyncState {
     ConfigUnreadable,
     WriteFailed,
     RestartRequired,
+    RequiresProjectTrust,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -116,12 +113,34 @@ fn timestamp_ms(value: Option<&Value>) -> Option<i64> {
     }
 }
 
+fn protected_project_roots() -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/")];
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".codex"));
+        roots.push(home.join(".claude"));
+        roots.push(home);
+    }
+    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
+        roots.push(PathBuf::from(codex_home));
+    }
+    if let Some(claude_home) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        roots.push(PathBuf::from(claude_home));
+    }
+    roots
+}
+
+fn is_allowed_project_path(path: &Path) -> bool {
+    protected_project_roots()
+        .into_iter()
+        .all(|root| path != root)
+}
+
 fn canonical_project(path: &str) -> Option<String> {
     let path = Path::new(path.trim());
     if path.is_dir() {
-        fs::canonicalize(path)
-            .ok()
-            .map(|value| value.to_string_lossy().to_string())
+        fs::canonicalize(path).ok().and_then(|value| {
+            is_allowed_project_path(&value).then(|| value.to_string_lossy().to_string())
+        })
     } else {
         None
     }
@@ -147,6 +166,39 @@ fn visit_jsonl_files(root: &Path, visit: &mut impl FnMut(&Path)) {
             visit(&path);
         }
     }
+}
+
+const MAX_SCAN_LINE_BYTES: u64 = 256 * 1024;
+
+fn limited_lines(path: &Path, max_lines: usize) -> Vec<String> {
+    let Ok(file) = fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut reader = BufReader::new(file);
+    let mut lines = Vec::new();
+    for _ in 0..max_lines {
+        let mut bytes = Vec::new();
+        let read = reader
+            .by_ref()
+            .take(MAX_SCAN_LINE_BYTES + 1)
+            .read_until(b'\n', &mut bytes)
+            .unwrap_or(0);
+        if read == 0 {
+            break;
+        }
+        if bytes.len() as u64 > MAX_SCAN_LINE_BYTES {
+            // 超长行整行丢掉；若这次没读到最后，再消费到下一个换行，避免把半行当 JSON。
+            if !bytes.ends_with(b"\n") {
+                let mut discarded = Vec::new();
+                let _ = reader.read_until(b'\n', &mut discarded);
+            }
+            continue;
+        }
+        if let Ok(line) = String::from_utf8(bytes) {
+            lines.push(line);
+        }
+    }
+    lines
 }
 
 #[derive(Default)]
@@ -190,10 +242,7 @@ impl DiscoveryBuilder {
 
 fn discover_codex(root: &Path, builder: &mut DiscoveryBuilder) {
     visit_jsonl_files(&root.join("sessions"), &mut |path| {
-        let Ok(file) = fs::File::open(path) else {
-            return;
-        };
-        for line in BufReader::new(file).lines().take(64).map_while(Result::ok) {
+        for line in limited_lines(path, 8) {
             let Ok(event) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -213,8 +262,9 @@ fn discover_codex(root: &Path, builder: &mut DiscoveryBuilder) {
 }
 
 fn discover_claude(root: &Path, builder: &mut DiscoveryBuilder) {
-    if let Ok(file) = fs::File::open(root.join("history.jsonl")) {
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
+    let history = root.join("history.jsonl");
+    if history.exists() {
+        for line in limited_lines(&history, usize::MAX) {
             let Ok(event) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -227,11 +277,8 @@ fn discover_claude(root: &Path, builder: &mut DiscoveryBuilder) {
     }
 
     visit_jsonl_files(&root.join("projects"), &mut |path| {
-        let Ok(file) = fs::File::open(path) else {
-            return;
-        };
         let fallback = file_mtime_ms(path);
-        for line in BufReader::new(file).lines().take(128).map_while(Result::ok) {
+        for line in limited_lines(path, 32) {
             let Ok(event) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -271,76 +318,32 @@ pub fn discover_default_projects() -> Vec<DiscoveredProject> {
     discover_from_roots(&codex_root, &claude_root)
 }
 
-fn merge_key(path: &str) -> String {
-    canonical_project(path).unwrap_or_else(|| path.trim().to_string())
+pub fn project_binding_list(config: &AppConfig, client: &str) -> Vec<ProjectBindingListItem> {
+    config
+        .settings
+        .project_model_bindings
+        .iter()
+        .filter(|binding| binding.client == client)
+        .map(|binding| ProjectBindingListItem {
+            id: binding.id.clone(),
+            path: binding.path.clone(),
+            client: binding.client.clone(),
+            model: binding.model.clone(),
+            missing: !Path::new(&binding.path).is_dir(),
+        })
+        .collect()
 }
 
-pub fn merge_project_list(
-    config: &AppConfig,
-    discovered: Vec<DiscoveredProject>,
-) -> Vec<ProjectListItem> {
-    let mut items: BTreeMap<String, ProjectListItem> = BTreeMap::new();
-    for project in &config.settings.project_model_projects {
-        let key = merge_key(&project.path);
-        items.insert(
-            key,
-            ProjectListItem {
-                id: project.id.clone(),
-                path: project.path.clone(),
-                codex_model: project.codex_model.clone(),
-                claude_model: project.claude_model.clone(),
-                manual: project.manual,
-                hidden: project.hidden,
-                sources: ProjectSources::default(),
-                last_activity_ms: None,
-                missing: !Path::new(&project.path).is_dir(),
-            },
-        );
-    }
-    for project in discovered {
-        let key = merge_key(&project.path);
-        if let Some(existing) = items.get_mut(&key) {
-            existing.sources.codex |= project.sources.codex;
-            existing.sources.claude |= project.sources.claude;
-            existing.last_activity_ms = match (existing.last_activity_ms, project.last_activity_ms)
-            {
-                (Some(left), Some(right)) => Some(left.max(right)),
-                (left, right) => left.or(right),
-            };
-            existing.missing = !Path::new(&existing.path).is_dir();
-        } else {
-            items.insert(
-                key,
-                ProjectListItem {
-                    id: format!("auto:{}", project.path),
-                    path: project.path,
-                    codex_model: None,
-                    claude_model: None,
-                    manual: false,
-                    hidden: false,
-                    sources: project.sources,
-                    last_activity_ms: project.last_activity_ms,
-                    missing: false,
-                },
-            );
-        }
-    }
-
-    let mut items: Vec<ProjectListItem> = items.into_values().collect();
-    items.sort_by(|left, right| {
-        let left_bound = left.codex_model.is_some() || left.claude_model.is_some();
-        let right_bound = right.codex_model.is_some() || right.claude_model.is_some();
-        right_bound
-            .cmp(&left_bound)
-            .then_with(|| {
-                right
-                    .last_activity_ms
-                    .unwrap_or(0)
-                    .cmp(&left.last_activity_ms.unwrap_or(0))
-            })
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    items
+pub fn discovery_candidates(discovered: &[DiscoveredProject], client: &str) -> Vec<String> {
+    discovered
+        .iter()
+        .filter(|project| match client {
+            "codex" => project.sources.codex,
+            "claude" => project.sources.claude,
+            _ => false,
+        })
+        .map(|project| project.path.clone())
+        .collect()
 }
 
 fn protocol_candidates(config: &AppConfig, protocol_id: &str) -> Vec<String> {
@@ -445,6 +448,24 @@ pub fn claude_settings_root(project_path: &str) -> PathBuf {
     git_path(&root, &["rev-parse", "--show-toplevel"]).unwrap_or(root)
 }
 
+pub fn codex_project_trust(project_path: &str, codex_home: &Path) -> Option<bool> {
+    let text = fs::read_to_string(codex_home.join("config.toml")).ok()?;
+    let document = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let projects = document.get("projects")?.as_table_like()?;
+    let canonical = fs::canonicalize(project_path)
+        .unwrap_or_else(|_| PathBuf::from(project_path))
+        .to_string_lossy()
+        .to_string();
+    let project = projects
+        .get(&canonical)
+        .or_else(|| projects.get(project_path.trim()))?;
+    match project.as_table_like()?.get("trust_level")?.as_str()? {
+        "trusted" => Some(true),
+        "untrusted" => Some(false),
+        _ => None,
+    }
+}
+
 fn project_config(client: &str, root: &Path) -> (PathBuf, &'static str, PathBuf) {
     match client {
         "codex" => (
@@ -482,8 +503,15 @@ pub fn apply_project_model(
     if !root.is_dir() {
         return ProjectSyncResult::status(ProjectSyncState::ProjectMissing, "项目目录不存在");
     }
+    let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    if !is_allowed_project_path(&canonical_root) {
+        return ProjectSyncResult::status(
+            ProjectSyncState::BindingInvalid,
+            "项目目录不能是根目录、用户主目录或客户端配置目录",
+        );
+    }
 
-    let (file_path, empty, write_root) = project_config(client, root);
+    let (file_path, empty, write_root) = project_config(client, &canonical_root);
     let original = match fs::read_to_string(&file_path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => empty.to_string(),

@@ -57,17 +57,15 @@ export function installTauriBridge() {
     addClientDir: (dirPath) => invoke('add_client_dir', { path: dirPath }),
     applyClientDir: (dirPath) => invoke('apply_client_dir', { path: dirPath }),
     removeClientDir: (dirId) => invoke('remove_client_dir', { id: dirId }),
-    getProjectModels: () => invoke('get_project_models'),
-    openProjectModelsWindow: () => invoke('open_project_models_window'),
-    refreshProjectModels: () => invoke('refresh_project_models'),
-    setProjectSyncEnabled: (enabled) => invoke('set_project_sync_enabled', { enabled }),
-    pickProjectDir: () => invoke('pick_project_dir'),
-    addProjectDir: (dirPath) => invoke('add_project_dir', { path: dirPath }),
-    setProjectModel: (dirPath, client, model) =>
-      invoke('set_project_model', { path: dirPath, client, model }),
-    hideProject: (dirPath) => invoke('hide_project', { path: dirPath }),
-    unhideProject: (dirPath) => invoke('unhide_project', { path: dirPath }),
-    removeProject: (dirPath) => invoke('remove_project', { path: dirPath }),
+    getProjectModels: (protocol) => invoke('get_project_models', { protocol }),
+    openProjectModelsWindow: (protocol) => invoke('open_project_models_window', { protocol }),
+    refreshProjectModels: (protocol) => invoke('refresh_project_models', { protocol }),
+    addProjectBindings: (protocol, paths, model) =>
+      invoke('add_project_bindings', { protocol, paths, model }),
+    setProjectBindingModel: (protocol, id, model) =>
+      invoke('set_project_binding_model', { protocol, id, model }),
+    removeProjectBinding: (protocol, id) =>
+      invoke('remove_project_binding', { protocol, id }),
     getLogs: () => invoke('get_logs'),
     getUsage: (range) => invoke('get_usage', { range }),
     getStorageStats: () => invoke('get_storage_stats'),

@@ -107,6 +107,7 @@ fn bootstrap(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
     app.manage(state.clone());
     state.proxy.init(state.clone());
+    state.prime_project_candidates();
 
     // 启动时按配置同步一次副作用：用户可能在系统设置里关掉了自启，而配置里还写着 true
     let snapshot = state.config_snapshot();
@@ -191,13 +192,9 @@ pub fn run() {
             commands::get_project_models,
             commands::open_project_models_window,
             commands::refresh_project_models,
-            commands::set_project_sync_enabled,
-            commands::pick_project_dir,
-            commands::add_project_dir,
-            commands::set_project_model,
-            commands::hide_project,
-            commands::unhide_project,
-            commands::remove_project,
+            commands::add_project_bindings,
+            commands::set_project_binding_model,
+            commands::remove_project_binding,
             commands::get_proxy_status,
             commands::start_proxy,
             commands::stop_proxy,

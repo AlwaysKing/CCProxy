@@ -5,7 +5,6 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
 import { useProxyStore } from '@/stores/useProxyStore'
 import { useClientDirsStore } from '@/stores/useClientDirsStore'
-import { useProjectModelsStore } from '@/stores/useProjectModelsStore'
 import { Toggle } from '@/components/base'
 import { logger } from '@/utils/logger'
 import ProvidersView from '@/views/providers/ProvidersView.vue'
@@ -25,8 +24,9 @@ const VIEW_ITEMS = [
 const configStore = useConfigStore()
 const proxyStore = useProxyStore()
 const clientDirsStore = useClientDirsStore()
-const projectModelsStore = useProjectModelsStore()
-const isProjectModelsWindow = new URLSearchParams(window.location.search).get('window') === 'project-models'
+const windowParams = new URLSearchParams(window.location.search)
+const isProjectModelsWindow = windowParams.get('window') === 'project-models'
+const projectProtocol = windowParams.get('protocol') || 'anthropic'
 
 const activeView = ref('providers')
 const activeProtocolId = ref(null)
@@ -49,9 +49,7 @@ async function onToggleProxy() {
 let unsubscribes = []
 
 onMounted(async () => {
-  unsubscribes.push(window.electronEvents.onProjectModelsChanged(() => projectModelsStore.reload()))
   if (isProjectModelsWindow) {
-    await projectModelsStore.reload()
     return
   }
   unsubscribes.push(window.electronEvents.onConfigChanged((payload) => configStore.applyState(payload)))
@@ -60,7 +58,6 @@ onMounted(async () => {
   // 启动就扫一遍客户端目录：有和 CCProxy 不一致的，顶栏常驻一个感叹号提醒，
   // 点它去设置页处理。配置/代理先就位，检查的口径（端口、token）才是最终的
   clientDirsStore.init()
-  projectModelsStore.reload()
   // 界面起来、IPC 通了的证据落一条日志：窗口白屏或命令没注册时，翻 app.log 就知道卡在哪一步
   logger.info('[UI] 界面已就绪', {
     protocols: configStore.protocols.map((protocol) => protocol.id),
@@ -81,7 +78,7 @@ onUnmounted(() => {
 
 <template>
   <div v-if="isProjectModelsWindow" class="app-subwindow">
-    <ProjectsView />
+    <ProjectsView :protocol-id="projectProtocol" />
   </div>
 
   <div v-else class="app-shell">

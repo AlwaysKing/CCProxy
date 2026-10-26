@@ -167,8 +167,7 @@ mod tests {
                 usage_enabled: true,
                 client_dirs: Vec::new(),
                 client_token: String::new(),
-                project_model_sync_enabled: false,
-                project_model_projects: Vec::new(),
+                project_model_bindings: Vec::new(),
             },
             providers: vec![Provider {
                 id: "p1".to_string(),

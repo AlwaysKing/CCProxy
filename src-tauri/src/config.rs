@@ -52,15 +52,11 @@ pub struct ClientDir {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ProjectModelProject {
+pub struct ProjectModelBinding {
     pub id: String,
     pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub codex_model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub claude_model: Option<String>,
-    pub manual: bool,
-    pub hidden: bool,
+    pub client: String,
+    pub model: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -72,8 +68,7 @@ pub struct Settings {
     pub usage_enabled: bool,
     pub client_dirs: Vec<ClientDir>,
     pub client_token: String,
-    pub project_model_sync_enabled: bool,
-    pub project_model_projects: Vec<ProjectModelProject>,
+    pub project_model_bindings: Vec<ProjectModelBinding>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -159,8 +154,7 @@ pub fn create_default_config() -> AppConfig {
             usage_enabled: true,
             client_dirs: Vec::new(),
             client_token: String::new(),
-            project_model_sync_enabled: false,
-            project_model_projects: Vec::new(),
+            project_model_bindings: Vec::new(),
         },
         protocols: SUPPORTED_PROTOCOLS
             .iter()
@@ -856,14 +850,13 @@ fn normalize_project_path(raw: &str) -> Option<String> {
 }
 
 fn normalize_project_model(
-    item: &Value,
-    key: &str,
-    project_id: &str,
+    raw: Option<&Value>,
+    binding_id: &str,
     issues: &mut Vec<String>,
 ) -> Option<String> {
-    let raw = item.get(key)?;
+    let raw = raw?;
     let Some(value) = raw.as_str() else {
-        issues.push(format!("项目 {project_id} 的 {key} 不是字符串，已清除"));
+        issues.push(format!("项目绑定 {binding_id} 的 model 不是字符串，已丢弃"));
         return None;
     };
     let value = value.trim();
@@ -871,7 +864,9 @@ fn normalize_project_model(
         return None;
     }
     if value.contains('*') {
-        issues.push(format!("项目 {project_id} 的 {key} 不能是通配符，已清除"));
+        issues.push(format!(
+            "项目绑定 {binding_id} 的 model 不能是通配符，已丢弃"
+        ));
         return None;
     }
     Some(value.to_string())
@@ -879,25 +874,27 @@ fn normalize_project_model(
 
 // 项目路径只做绝对路径与重复分隔符的纯字符串归一化，不访问文件系统：
 // 项目临时离线不能让一次无关保存把绑定删掉。存在性在发现、添加和同步阶段检查。
-fn normalize_project_models(
-    raw: Option<&Value>,
+fn normalize_project_bindings(
+    settings: &Value,
     issues: &mut Vec<String>,
-) -> Vec<ProjectModelProject> {
-    let Some(raw) = raw else {
+) -> Vec<ProjectModelBinding> {
+    let current = settings.get("projectModelBindings");
+    let legacy = settings.get("projectModelProjects");
+    let Some(raw) = current.or(legacy) else {
         return Vec::new();
     };
     if raw.is_null() {
         return Vec::new();
     }
     let Some(items) = raw.as_array() else {
-        issues.push("settings.projectModelProjects 不是数组，已重置为空".to_string());
+        issues.push("settings.projectModelBindings 不是数组，已重置为空".to_string());
         return Vec::new();
     };
 
-    let mut projects: Vec<ProjectModelProject> = Vec::new();
+    let mut bindings: Vec<ProjectModelBinding> = Vec::new();
     for item in items {
         if !is_plain_object(item) {
-            issues.push("settings.projectModelProjects 下存在非法条目，已丢弃".to_string());
+            issues.push("settings.projectModelBindings 下存在非法条目，已丢弃".to_string());
             continue;
         }
         let raw_path = item.get("path").and_then(as_str).unwrap_or("");
@@ -908,42 +905,64 @@ fn normalize_project_models(
             ));
             continue;
         };
-        if projects.iter().any(|kept| kept.path == path) {
-            issues.push(format!(
-                "settings.projectModelProjects 存在重复的项目目录 {path}，已丢弃后者"
-            ));
-            continue;
-        }
 
-        let raw_id = item.get("id").and_then(as_str).unwrap_or("").trim();
-        let mut id = if raw_id.is_empty() {
-            create_config_id("p")
+        let is_legacy = current.is_none();
+        let candidates: Vec<(&str, Option<&Value>)> = if is_legacy {
+            vec![
+                ("codex", item.get("codexModel")),
+                ("claude", item.get("claudeModel")),
+            ]
         } else {
-            raw_id.to_string()
+            let client = item.get("client").and_then(as_str).unwrap_or("");
+            vec![(client, item.get("model"))]
         };
-        if projects.iter().any(|kept| kept.id == id) {
-            issues.push(format!(
-                "settings.projectModelProjects 存在重复的项目 id {id}，已重新生成"
-            ));
-            loop {
-                let candidate = create_config_id("p");
-                if !projects.iter().any(|kept| kept.id == candidate) {
-                    id = candidate;
-                    break;
+        for (client, raw_model) in candidates {
+            if client != "codex" && client != "claude" {
+                issues.push(format!(
+                    "项目绑定 {path} 的 client 非法（{client}），已丢弃"
+                ));
+                continue;
+            }
+            if bindings
+                .iter()
+                .any(|kept| kept.path == path && kept.client == client)
+            {
+                issues.push(format!("存在重复的项目绑定 {path} ({client})，已丢弃后者"));
+                continue;
+            }
+            let raw_id = item.get("id").and_then(as_str).unwrap_or("").trim();
+            let mut id = if raw_id.is_empty() {
+                create_config_id("b")
+            } else if is_legacy {
+                create_config_id("b")
+            } else {
+                raw_id.to_string()
+            };
+            if bindings.iter().any(|kept| kept.id == id) {
+                issues.push(format!("存在重复的项目绑定 id {id}，已重新生成"));
+                loop {
+                    let candidate = create_config_id("b");
+                    if !bindings.iter().any(|kept| kept.id == candidate) {
+                        id = candidate;
+                        break;
+                    }
                 }
             }
+            let Some(model) = normalize_project_model(raw_model, &id, issues) else {
+                continue;
+            };
+            bindings.push(ProjectModelBinding {
+                id,
+                path: path.clone(),
+                client: client.to_string(),
+                model,
+            });
         }
-
-        projects.push(ProjectModelProject {
-            id: id.clone(),
-            path,
-            codex_model: normalize_project_model(item, "codexModel", &id, issues),
-            claude_model: normalize_project_model(item, "claudeModel", &id, issues),
-            manual: item.get("manual").and_then(Value::as_bool) == Some(true),
-            hidden: item.get("hidden").and_then(Value::as_bool) == Some(true),
-        });
     }
-    projects
+    if current.is_none() && !bindings.is_empty() {
+        issues.push("项目模型绑定已从旧结构升级为按客户端拆分".to_string());
+    }
+    bindings
 }
 
 // JS 的 Number() 语义：数字原样、字符串按数值解析（空串是 0）、布尔转 0/1、null 是 0
@@ -1273,14 +1292,7 @@ pub fn validate_config(raw: &Value) -> Validated {
                 .unwrap_or("")
                 .trim()
                 .to_string(),
-            project_model_sync_enabled: settings
-                .get("projectModelSyncEnabled")
-                .and_then(Value::as_bool)
-                == Some(true),
-            project_model_projects: normalize_project_models(
-                settings.get("projectModelProjects"),
-                &mut issues,
-            ),
+            project_model_bindings: normalize_project_bindings(settings, &mut issues),
         },
         providers,
         protocols,

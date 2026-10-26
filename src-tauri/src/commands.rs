@@ -260,27 +260,47 @@ pub async fn remove_client_dir(
 }
 
 #[tauri::command]
-pub async fn get_project_models(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
-    let view = state.project_models_view();
-    Ok(json!({
-        "success": true,
-        "view": serde_json::to_value(view).unwrap_or(Value::Null)
-    }))
+pub async fn get_project_models(
+    state: State<'_, Arc<AppState>>,
+    protocol: String,
+) -> Result<Value, String> {
+    match state.project_models_view(&protocol, false).await {
+        Ok(view) => Ok(json!({
+            "success": true,
+            "view": serde_json::to_value(view).unwrap_or(Value::Null)
+        })),
+        Err(error) => Ok(error_value(error)),
+    }
 }
 
 #[tauri::command]
-pub async fn open_project_models_window(app: tauri::AppHandle) -> Result<Value, String> {
-    if let Some(window) = app.get_webview_window("project-models") {
+pub async fn open_project_models_window(
+    app: tauri::AppHandle,
+    protocol: String,
+) -> Result<Value, String> {
+    let client = match protocol.as_str() {
+        "anthropic" => "claude",
+        "openai_responses" => "codex",
+        _ => return Ok(error_value("该协议不支持项目默认模型")),
+    };
+    let label = format!("project-models-{client}");
+    if let Some(window) = app.get_webview_window(&label) {
         let _ = window.show();
         let _ = window.set_focus();
         return Ok(json!({ "success": true }));
     }
     tauri::WebviewWindowBuilder::new(
         &app,
-        "project-models",
-        tauri::WebviewUrl::App("index.html?window=project-models".into()),
+        &label,
+        tauri::WebviewUrl::App(
+            format!("index.html?window=project-models&protocol={protocol}").into(),
+        ),
     )
-    .title("项目模型")
+    .title(if client == "codex" {
+        "项目默认模型 · Codex"
+    } else {
+        "项目默认模型 · Claude"
+    })
     .inner_size(1040.0, 720.0)
     .min_inner_size(840.0, 560.0)
     .resizable(true)
@@ -290,93 +310,52 @@ pub async fn open_project_models_window(app: tauri::AppHandle) -> Result<Value, 
 }
 
 #[tauri::command]
-pub async fn refresh_project_models(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
-    get_project_models(state).await
-}
-
-#[tauri::command]
-pub async fn set_project_sync_enabled(
+pub async fn refresh_project_models(
     state: State<'_, Arc<AppState>>,
-    enabled: bool,
+    protocol: String,
 ) -> Result<Value, String> {
-    match state.set_project_sync_enabled(enabled) {
-        Ok(config) => Ok(json!({
+    match state.project_models_view(&protocol, true).await {
+        Ok(view) => Ok(json!({
             "success": true,
-            "enabled": config.settings.project_model_sync_enabled
+            "view": serde_json::to_value(view).unwrap_or(Value::Null)
         })),
         Err(error) => Ok(error_value(error)),
     }
 }
 
 #[tauri::command]
-pub async fn pick_project_dir(app: tauri::AppHandle) -> Result<Value, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .set_title("选择项目工作目录")
-        .pick_folder(move |path| {
-            let _ = sender.send(path);
-        });
-    let picked = receiver.await.ok().flatten();
-    Ok(json!({
-        "success": true,
-        "path": picked.map(|path| path.to_string())
-    }))
-}
-
-#[tauri::command]
-pub async fn add_project_dir(
+pub async fn add_project_bindings(
     state: State<'_, Arc<AppState>>,
-    path: String,
-) -> Result<Value, String> {
-    match state.add_project_dir(path.trim()) {
-        Ok(()) => Ok(json!({ "success": true })),
-        Err(error) => Ok(error_value(error)),
-    }
-}
-
-#[tauri::command]
-pub async fn set_project_model(
-    state: State<'_, Arc<AppState>>,
-    path: String,
-    client: String,
+    protocol: String,
+    paths: Vec<String>,
     model: String,
 ) -> Result<Value, String> {
-    match state.set_project_model(path.trim(), &client, &model) {
-        Ok(status) => Ok(json!({
-            "success": true,
-            "status": serde_json::to_value(status).unwrap_or(Value::Null)
-        })),
-        Err(error) => Ok(error_value(error)),
-    }
-}
-
-#[tauri::command]
-pub async fn hide_project(state: State<'_, Arc<AppState>>, path: String) -> Result<Value, String> {
-    match state.set_project_hidden(path.trim(), true) {
+    match state.add_project_bindings(&protocol, paths, &model).await {
         Ok(()) => Ok(json!({ "success": true })),
         Err(error) => Ok(error_value(error)),
     }
 }
 
 #[tauri::command]
-pub async fn unhide_project(
+pub async fn set_project_binding_model(
     state: State<'_, Arc<AppState>>,
-    path: String,
+    protocol: String,
+    id: String,
+    model: String,
 ) -> Result<Value, String> {
-    match state.set_project_hidden(path.trim(), false) {
+    match state.set_project_binding_model(&protocol, &id, &model) {
         Ok(()) => Ok(json!({ "success": true })),
         Err(error) => Ok(error_value(error)),
     }
 }
 
 #[tauri::command]
-pub async fn remove_project(
+pub async fn remove_project_binding(
     state: State<'_, Arc<AppState>>,
-    path: String,
+    protocol: String,
+    id: String,
 ) -> Result<Value, String> {
-    match state.remove_project(path.trim()) {
+    match state.remove_project_binding(&protocol, &id) {
         Ok(()) => Ok(json!({ "success": true })),
         Err(error) => Ok(error_value(error)),
     }

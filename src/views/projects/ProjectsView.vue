@@ -1,65 +1,84 @@
 <script setup>
-// 项目默认模型：一个工作目录一行，分别同步 Codex 与 Claude Code 的顶层 model。
-import { computed, onMounted } from 'vue'
+// 协议隔离的项目默认模型子窗口：Anthropic 管 Claude，OpenAI Responses 管 Codex。
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useProjectModelsStore } from '@/stores/useProjectModelsStore'
-import { Badge, BaseButton, BaseInput, EmptyState, Toggle } from '@/components/base'
+import { Badge, BaseButton, BaseDialog, BaseInput, EmptyState, FormField } from '@/components/base'
 import AppSelect from '@/components/base/AppSelect.vue'
 
+const props = defineProps({
+  protocolId: {
+    type: String,
+    required: true
+  }
+})
+
 const store = useProjectModelsStore()
+const addVisible = ref(false)
+const selectedPaths = ref([])
+const addModel = ref('')
+const search = ref('')
+const candidateSearch = ref('')
+let unsubscribe = null
 
 const STATUS_META = {
   ok: { label: '已同步', variant: 'success' },
-  sync_disabled: { label: '同步已关闭', variant: 'default' },
   binding_invalid: { label: '绑定失效', variant: 'warning' },
   project_missing: { label: '目录不存在', variant: 'warning' },
   config_unreadable: { label: '配置不可读', variant: 'error' },
   write_failed: { label: '写入失败', variant: 'error' },
-  restart_required: { label: '待重启 Codex', variant: 'warning' }
+  restart_required: { label: '待重启 Codex', variant: 'warning' },
+  requires_project_trust: { label: '需信任项目', variant: 'warning' }
 }
 
-function withUnset(models) {
-  return [{ value: '', label: '不设置' }, ...models.map((model) => ({ value: model, label: model }))]
+const modelOptions = computed(() =>
+  store.view.modelCandidates.map((model) => ({ value: model, label: model }))
+)
+
+const filteredProjects = computed(() => {
+  const needle = search.value.trim().toLowerCase()
+  return store.view.projects.filter((project) => !needle || project.path.toLowerCase().includes(needle))
+})
+
+const boundPaths = computed(() => new Set(store.view.projects.map((project) => project.path)))
+
+const availableCandidates = computed(() => {
+  const needle = candidateSearch.value.trim().toLowerCase()
+  return store.view.directoryCandidates.filter(
+    (path) => !boundPaths.value.has(path) && (!needle || path.toLowerCase().includes(needle))
+  )
+})
+
+function statusMeta(project) {
+  if (!project.status) return { label: '等待同步', variant: 'default' }
+  return STATUS_META[project.status.status] || { label: project.status.status, variant: 'default' }
 }
 
-const codexOptions = computed(() => withUnset(store.candidates.codex))
-const claudeOptions = computed(() => withUnset(store.candidates.claude))
-
-function sourceLabels(project) {
-  const labels = []
-  if (project.manual) labels.push('手动')
-  if (project.sources?.codex) labels.push('Codex')
-  if (project.sources?.claude) labels.push('Claude')
-  if (!labels.length) labels.push('已保存')
-  return labels
+function toggleCandidate(path) {
+  selectedPaths.value = selectedPaths.value.includes(path)
+    ? selectedPaths.value.filter((item) => item !== path)
+    : [...selectedPaths.value, path]
 }
 
-function statusFor(project, client) {
-  return client === 'codex' ? project.codexStatus : project.claudeStatus
+function openAdd() {
+  selectedPaths.value = []
+  candidateSearch.value = ''
+  addModel.value = store.view.modelCandidates[0] || ''
+  addVisible.value = true
 }
 
-function statusMeta(project, client, model) {
-  const status = statusFor(project, client)
-  if (!status) {
-    return model
-      ? { label: '等待同步', variant: 'default' }
-      : null
-  }
-  return STATUS_META[status.status] || { label: status.status, variant: 'default' }
-}
-
-function shortPath(path) {
-  const home = '/Users/'
-  if (!path.startsWith(home)) return path
-  const parts = path.split('/')
-  return parts.length > 4 ? `…/${parts.slice(-3).join('/')}` : path
-}
-
-function onModelChange(project, client, model) {
-  return store.setModel(project, client, model)
+async function confirmAdd() {
+  if (!selectedPaths.value.length || !addModel.value) return
+  const ok = await store.add(props.protocolId, selectedPaths.value, addModel.value)
+  if (ok) addVisible.value = false
 }
 
 onMounted(() => {
-  store.reload()
+  store.reload(props.protocolId)
+  unsubscribe = window.electronEvents.onProjectModelsChanged(() => store.reload(props.protocolId))
+})
+
+onUnmounted(() => {
+  if (unsubscribe) unsubscribe()
 })
 </script>
 
@@ -67,223 +86,154 @@ onMounted(() => {
   <div class="projects-page">
     <header class="page-bar">
       <div>
-        <div class="page-title-line">
-          <h2>项目默认模型</h2>
-          <Badge :variant="store.enabled ? 'success' : 'default'" size="sm">
-            {{ store.enabled ? '已启用' : '已关闭' }}
-          </Badge>
-        </div>
+        <h1>{{ store.view.title }}</h1>
         <p class="page-subtitle">
-          按工作目录固定 Codex 与 Claude Code 的默认模型；只写入项目配置里的 <code>model</code>。
+          从全局会话目录选择项目，固定未来会话使用的默认模型。移除绑定不会删除项目配置。
         </p>
       </div>
-      <Toggle
-        :model-value="store.enabled"
-        :disabled="store.busy"
-        size="md"
-        title="开启或关闭项目模型同步"
-        @change="store.setEnabled"
-      />
+      <div class="bar-actions">
+        <BaseButton
+          variant="secondary"
+          size="sm"
+          :loading="store.loading"
+          @click="store.reload(protocolId, true)"
+        >
+          刷新候选
+        </BaseButton>
+        <BaseButton size="sm" :disabled="!availableCandidates.length" @click="openAdd">
+          + 添加项目
+        </BaseButton>
+      </div>
     </header>
 
     <p v-if="store.notice" class="page-notice">{{ store.notice }}</p>
 
-    <div v-if="!store.enabled" class="page-card feature-off">
-      <strong>项目模型同步已关闭</strong>
-      <span>
-        已有的项目绑定和客户端配置都会保留。开启后会重新发现项目，并对所有有效绑定执行一次同步。
-      </span>
-    </div>
-
-    <div class="page-card toolbar-card">
-      <div class="toolbar-search">
-        <BaseInput
-          v-model="store.search"
-          size="sm"
-          placeholder="搜索项目路径"
-          :disabled="!store.enabled"
-        />
+    <div class="page-card">
+      <div class="table-toolbar">
+        <BaseInput v-model="search" size="sm" placeholder="搜索项目路径" />
+        <span>{{ filteredProjects.length }} 个项目</span>
       </div>
-      <label class="hidden-filter">
-        <Toggle
-          :model-value="store.showHidden"
-          size="sm"
-          :disabled="!store.enabled"
-          @change="store.showHidden = $event"
-        />
-        显示已隐藏
-      </label>
-      <span class="toolbar-count">
-        {{ store.enabled ? `${store.filteredProjects.length} 个项目` : '' }}
-      </span>
-      <BaseButton
-        variant="secondary"
-        size="sm"
-        :loading="store.busy"
-        :disabled="!store.enabled"
-        @click="store.refresh"
-      >
-        刷新项目
-      </BaseButton>
-      <BaseButton
-        size="sm"
-        :disabled="!store.enabled || store.busy"
-        @click="store.add"
-      >
-        + 添加项目
-      </BaseButton>
-    </div>
 
-    <div class="page-card project-list-card">
-      <div v-if="store.loading && !store.projects.length" class="loading-state">正在读取项目…</div>
-
-      <table v-else-if="store.filteredProjects.length" class="data-table project-table">
+      <table v-if="filteredProjects.length" class="data-table">
         <thead>
           <tr>
             <th>项目</th>
-            <th>来源</th>
-            <th>Codex 默认模型</th>
-            <th>Claude Code 默认模型</th>
+            <th>默认模型</th>
+            <th>状态</th>
             <th class="col-actions"></th>
           </tr>
         </thead>
         <tbody>
-          <tr
-            v-for="project in store.filteredProjects"
-            :key="project.id"
-            :class="{ 'is-hidden': project.hidden, 'is-missing': project.missing }"
-          >
+          <tr v-for="project in filteredProjects" :key="project.id">
             <td class="project-cell">
-              <code class="project-path" :title="project.path">{{ shortPath(project.path) }}</code>
+              <code :title="project.path">{{ project.path }}</code>
               <span v-if="project.missing" class="project-warning">目录暂不可用</span>
             </td>
             <td>
-              <div class="source-list">
-                <Badge
-                  v-for="label in sourceLabels(project)"
-                  :key="label"
-                  variant="default"
-                  size="sm"
-                >
-                  {{ label }}
-                </Badge>
-                <Badge v-if="project.hidden" variant="warning" size="sm">已隐藏</Badge>
-              </div>
+              <AppSelect
+                :model-value="project.model"
+                :options="modelOptions"
+                :disabled="store.busy || !modelOptions.length"
+                full-width
+                @change="store.setModel(protocolId, project.id, $event.value)"
+              />
             </td>
             <td>
-              <div class="model-cell">
-                <AppSelect
-                  :model-value="project.codexModel || ''"
-                  :selected-label="project.codexModel || ''"
-                  :options="codexOptions"
-                  :disabled="store.busy || !store.enabled || project.missing"
-                  full-width
-                  @change="onModelChange(project, 'codex', $event.value)"
-                />
-                <div
-                  v-if="statusMeta(project, 'codex', project.codexModel)"
-                  class="model-status"
-                  :title="statusFor(project, 'codex')?.message || ''"
-                >
-                  <Badge
-                    :variant="statusMeta(project, 'codex', project.codexModel).variant"
-                    size="sm"
-                  >
-                    {{ statusMeta(project, 'codex', project.codexModel).label }}
-                  </Badge>
-                </div>
-              </div>
-            </td>
-            <td>
-              <div class="model-cell">
-                <AppSelect
-                  :model-value="project.claudeModel || ''"
-                  :selected-label="project.claudeModel || ''"
-                  :options="claudeOptions"
-                  :disabled="store.busy || !store.enabled || project.missing"
-                  full-width
-                  @change="onModelChange(project, 'claude', $event.value)"
-                />
-                <div
-                  v-if="statusMeta(project, 'claude', project.claudeModel)"
-                  class="model-status"
-                  :title="statusFor(project, 'claude')?.message || ''"
-                >
-                  <Badge
-                    :variant="statusMeta(project, 'claude', project.claudeModel).variant"
-                    size="sm"
-                  >
-                    {{ statusMeta(project, 'claude', project.claudeModel).label }}
-                  </Badge>
-                </div>
-              </div>
+              <Badge :variant="statusMeta(project).variant" size="sm">
+                {{ statusMeta(project).label }}
+              </Badge>
+              <span
+                v-if="project.status?.message"
+                class="status-message"
+                :title="project.status.message"
+              >{{ project.status.message }}</span>
             </td>
             <td class="col-actions">
               <BaseButton
                 variant="ghost"
                 size="sm"
                 :disabled="store.busy"
-                @click="store.hide(project)"
-              >
-                {{ project.hidden ? '显示' : '隐藏' }}
-              </BaseButton>
-              <BaseButton
-                variant="ghost"
-                size="sm"
-                :disabled="store.busy"
-                @click="store.remove(project)"
-              >
-                移除
-              </BaseButton>
+                @click="store.remove(protocolId, project.id)"
+              >移除</BaseButton>
             </td>
           </tr>
         </tbody>
       </table>
 
       <EmptyState
-        v-else-if="store.enabled"
-        title="还没有发现项目"
-        description="从 Codex 或 Claude 使用过的目录会自动出现在这里，也可以手动添加"
-      />
-      <EmptyState
         v-else
-        title="项目模型同步未开启"
-        description="开启后才会扫描客户端已有的项目历史"
+        title="还没有项目绑定"
+        description="从全局会话目录中批量选择项目，为它们设置同一个默认模型"
       />
     </div>
 
-    <div v-if="store.enabled" class="page-card notes-card">
+    <div class="page-card notes-card">
       <div>
         <strong>生效方式</strong>
-        <span>已运行的客户端通常要到新会话才读取新的默认模型。</span>
+        <span>项目配置写入后，已运行的客户端通常要到新会话才读取新的默认模型。</span>
       </div>
-      <div>
+      <div v-if="store.view.client === 'codex'">
         <strong>Codex 项目信任</strong>
-        <span>Codex 只会加载受信任项目的 <code>.codex/config.toml</code>；项目未受信任时文件会写入，但不会生效。</span>
+        <span>只有受信任项目的 <code>.codex/config.toml</code> 才会被加载。</span>
       </div>
-      <div>
-        <strong>Git 工作区</strong>
-        <span>
-          CCProxy 可能新建未跟踪的 <code>.codex/config.toml</code> 或
-          <code>.claude/settings.local.json</code>；提交前请检查团队是否需要共享这个模型选择。
-        </span>
-      </div>
-      <div v-if="store.daemon?.running" class="daemon-note">
+      <div v-if="store.view.codexDaemon?.running" class="daemon-note">
         <strong>Codex app-server 正在运行</strong>
         <span>
-          项目配置已经写入，但 daemon 只在启动时读取。执行
-          <code>{{ store.daemon.restartCommand }}</code>
-          后生效，正在运行的会话会被打断。
+          配置已写入，但 daemon 只在启动时读取。执行
+          <code>{{ store.view.codexDaemon.restartCommand }}</code>
+          后生效。
         </span>
       </div>
     </div>
+
+    <BaseDialog
+      v-model="addVisible"
+      title="添加项目"
+      width="680px"
+    >
+      <FormField label="初始默认模型" required>
+        <AppSelect v-model="addModel" :options="modelOptions" full-width />
+      </FormField>
+
+      <FormField
+        label="会话目录候选"
+        :hint="`已选 ${selectedPaths.length} 个目录`"
+      >
+        <BaseInput v-model="candidateSearch" size="sm" placeholder="搜索候选目录" />
+        <div v-if="availableCandidates.length" class="candidate-list">
+          <label
+            v-for="path in availableCandidates"
+            :key="path"
+            class="candidate-row"
+            :class="{ selected: selectedPaths.includes(path) }"
+          >
+            <input
+              type="checkbox"
+              :checked="selectedPaths.includes(path)"
+              @change="toggleCandidate(path)"
+            />
+            <code>{{ path }}</code>
+          </label>
+        </div>
+        <p v-else class="candidate-empty">当前协议没有新的会话目录候选</p>
+      </FormField>
+
+      <template #footer>
+        <BaseButton variant="secondary" size="sm" @click="addVisible = false">取消</BaseButton>
+        <BaseButton
+          size="sm"
+          :loading="store.busy"
+          :disabled="!selectedPaths.length || !addModel"
+          @click="confirmAdd"
+        >添加 {{ selectedPaths.length ? `(${selectedPaths.length})` : '' }}</BaseButton>
+      </template>
+    </BaseDialog>
   </div>
 </template>
 
 <style scoped>
 .projects-page {
-  flex: 1;
-  min-height: 0;
+  height: 100%;
   padding: var(--spacing-xl);
   display: flex;
   flex-direction: column;
@@ -298,19 +248,12 @@ onMounted(() => {
   gap: var(--spacing-lg);
 }
 
-.page-title-line {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-sm);
-}
-
-.page-title-line h2 {
+.page-bar h1 {
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
 }
 
 .page-subtitle,
-.feature-off span,
 .notes-card span {
   color: var(--text-secondary);
   font-size: var(--font-size-sm);
@@ -320,63 +263,34 @@ onMounted(() => {
   margin-top: var(--spacing-xs);
 }
 
-.feature-off,
-.notes-card > div {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-xs);
-}
-
-.toolbar-card {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-md);
-}
-
-.toolbar-search {
-  width: min(320px, 34vw);
-}
-
-.hidden-filter {
+.bar-actions {
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  white-space: nowrap;
 }
 
-.toolbar-count {
-  margin-left: auto;
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-lg);
+  margin-bottom: var(--spacing-md);
   color: var(--text-muted);
   font-size: var(--font-size-xs);
 }
 
-.project-list-card {
-  padding-top: var(--spacing-md);
-  padding-bottom: var(--spacing-md);
-}
-
-.project-table th,
-.project-table td {
-  padding-top: 10px;
-  padding-bottom: 10px;
-}
-
-.project-table .col-actions {
-  width: 128px;
-  text-align: right;
+.table-toolbar :deep(.base-input-wrapper) {
+  width: min(340px, 45vw);
 }
 
 .project-cell {
-  max-width: 320px;
+  max-width: 390px;
 }
 
-.project-path {
+.project-cell code {
   display: block;
   overflow: hidden;
-  color: var(--text-primary);
-  font-size: var(--font-size-sm);
+  font-family: var(--font-family-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -388,41 +302,20 @@ onMounted(() => {
   font-size: var(--font-size-xs);
 }
 
-.source-list,
-.model-cell {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-sm);
-}
-
-.source-list {
-  flex-wrap: wrap;
-}
-
-.model-cell {
-  min-width: 190px;
-}
-
-.model-cell :deep(.app-select) {
-  min-width: 150px;
-}
-
-.model-status {
-  flex: 0 0 auto;
-}
-
-.is-hidden {
-  opacity: 0.62;
-}
-
-.is-missing .project-path {
+.status-message {
+  display: block;
+  max-width: 240px;
+  overflow: hidden;
+  margin-top: 3px;
   color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.loading-state {
-  padding: var(--spacing-xl);
-  color: var(--text-muted);
-  text-align: center;
+.col-actions {
+  width: 70px;
+  text-align: right;
 }
 
 .notes-card {
@@ -431,8 +324,53 @@ onMounted(() => {
   gap: var(--spacing-md);
 }
 
+.notes-card > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
 .daemon-note {
   padding-top: var(--spacing-md);
   border-top: 1px solid var(--border-default);
+}
+
+.candidate-list {
+  max-height: 280px;
+  overflow-y: auto;
+  margin-top: var(--spacing-sm);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.candidate-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  cursor: pointer;
+}
+
+.candidate-row + .candidate-row {
+  border-top: 1px solid var(--border-default);
+}
+
+.candidate-row:hover,
+.candidate-row.selected {
+  background-color: var(--bg-hover);
+}
+
+.candidate-row code {
+  overflow: hidden;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-empty {
+  margin-top: var(--spacing-sm);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
 }
 </style>

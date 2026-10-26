@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
-use crate::clients::project_models::{ProjectListItem, ProjectModelCandidates, ProjectSyncState};
+use crate::clients::project_models::{DiscoveredProject, ProjectSyncState};
 use crate::clients::{apply_client_config, expected_catalog_entries, scan_client_dirs};
 use crate::config::{create_client_token, AppConfig, ConfigManager, DEFAULT_PORT};
 use crate::logger;
@@ -38,24 +38,6 @@ pub struct ProjectSyncStatusSnapshot {
     pub daemon_pid: Option<u32>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectModelRow {
-    #[serde(flatten)]
-    pub project: ProjectListItem,
-    pub codex_status: Option<ProjectSyncStatusSnapshot>,
-    pub claude_status: Option<ProjectSyncStatusSnapshot>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectModelsView {
-    pub enabled: bool,
-    pub candidates: ProjectModelCandidates,
-    pub projects: Vec<ProjectModelRow>,
-    pub codex_daemon: Option<crate::clients::daemon::CodexDaemon>,
-}
-
 pub struct AppState {
     handle: OnceLock<AppHandle>,
     pub config_manager: ConfigManager,
@@ -69,7 +51,9 @@ pub struct AppState {
     pub backup_path: RwLock<Option<String>>,
     pub proxy_status: RwLock<ProxyStatus>,
     config_transaction: Mutex<()>,
-    project_sync_status: RwLock<HashMap<(String, String), ProjectSyncStatusSnapshot>>,
+    project_sync_status: RwLock<HashMap<String, ProjectSyncStatusSnapshot>>,
+    project_candidates: RwLock<Option<Vec<DiscoveredProject>>>,
+    project_candidates_scan: tokio::sync::Mutex<()>,
     pub http_client: reqwest::Client,
 }
 
@@ -97,6 +81,8 @@ impl AppState {
             }),
             config_transaction: Mutex::new(()),
             project_sync_status: RwLock::new(HashMap::new()),
+            project_candidates: RwLock::new(None),
+            project_candidates_scan: tokio::sync::Mutex::new(()),
             http_client,
         }
     }
@@ -304,17 +290,14 @@ impl AppState {
             .unwrap_or(true);
         let projects_changed = previous
             .map(|config| {
-                config.settings.project_model_sync_enabled
-                    != next.settings.project_model_sync_enabled
-                    || config.settings.project_model_projects
-                        != next.settings.project_model_projects
+                config.settings.project_model_bindings != next.settings.project_model_bindings
             })
             .unwrap_or(true);
         if protocols_changed {
             self.sync_managed_codex_catalogs();
         }
-        if next.settings.project_model_sync_enabled
-            && (projects_changed || protocols_changed || providers_changed)
+        if (projects_changed || protocols_changed || providers_changed)
+            && !next.settings.project_model_bindings.is_empty()
         {
             self.sync_all_project_models_locked(next);
         }
