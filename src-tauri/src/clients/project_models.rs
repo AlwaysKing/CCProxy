@@ -55,6 +55,7 @@ pub struct ProjectModelCandidates {
 #[serde(rename_all = "snake_case")]
 pub enum ProjectSyncState {
     Ok,
+    SyncDisabled,
     BindingInvalid,
     ProjectMissing,
     ConfigUnreadable,

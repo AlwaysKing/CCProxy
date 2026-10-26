@@ -2,13 +2,15 @@
 // 与原 Electron 版一致：所有配置变更都从 apply_config 这一条路走，
 // 落盘 → 更新内存 → 应用副作用 → 刷托盘 → 通知界面。
 
-use std::sync::{Arc, OnceLock, RwLock};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
+use crate::clients::project_models::{ProjectListItem, ProjectModelCandidates, ProjectSyncState};
 use crate::clients::{apply_client_config, expected_catalog_entries, scan_client_dirs};
 use crate::config::{create_client_token, AppConfig, ConfigManager, DEFAULT_PORT};
 use crate::logger;
@@ -16,11 +18,42 @@ use crate::proxy::Proxy;
 use crate::request_log::RequestLog;
 use crate::tray;
 
+mod project_models;
+
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct ProxyStatus {
     pub status: String,
     pub port: Option<u16>,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSyncStatusSnapshot {
+    pub status: ProjectSyncState,
+    pub message: Option<String>,
+    pub file: Option<String>,
+    pub changed: bool,
+    pub synced_at_ms: i64,
+    pub daemon_pid: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectModelRow {
+    #[serde(flatten)]
+    pub project: ProjectListItem,
+    pub codex_status: Option<ProjectSyncStatusSnapshot>,
+    pub claude_status: Option<ProjectSyncStatusSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectModelsView {
+    pub enabled: bool,
+    pub candidates: ProjectModelCandidates,
+    pub projects: Vec<ProjectModelRow>,
+    pub codex_daemon: Option<crate::clients::daemon::CodexDaemon>,
 }
 
 pub struct AppState {
@@ -35,6 +68,8 @@ pub struct AppState {
     pub recovered: RwLock<bool>,
     pub backup_path: RwLock<Option<String>>,
     pub proxy_status: RwLock<ProxyStatus>,
+    config_transaction: Mutex<()>,
+    project_sync_status: RwLock<HashMap<(String, String), ProjectSyncStatusSnapshot>>,
     pub http_client: reqwest::Client,
 }
 
@@ -60,6 +95,8 @@ impl AppState {
                 port: None,
                 error: None,
             }),
+            config_transaction: Mutex::new(()),
+            project_sync_status: RwLock::new(HashMap::new()),
             http_client,
         }
     }
@@ -87,15 +124,24 @@ impl AppState {
     }
 
     pub fn config_snapshot(&self) -> AppConfig {
-        self.config.read().map(|config| config.clone()).unwrap_or_else(|_| crate::config::create_default_config())
+        self.config
+            .read()
+            .map(|config| config.clone())
+            .unwrap_or_else(|_| crate::config::create_default_config())
     }
 
     pub fn port(&self) -> u16 {
-        self.config.read().map(|config| config.settings.port).unwrap_or(DEFAULT_PORT)
+        self.config
+            .read()
+            .map(|config| config.settings.port)
+            .unwrap_or(DEFAULT_PORT)
     }
 
     pub fn proxy_status(&self) -> ProxyStatus {
-        self.proxy_status.read().map(|status| status.clone()).unwrap_or_default()
+        self.proxy_status
+            .read()
+            .map(|status| status.clone())
+            .unwrap_or_default()
     }
 
     pub fn set_proxy_status(&self, next: ProxyStatus) {
@@ -103,15 +149,26 @@ impl AppState {
             *slot = next.clone();
         }
         tray::refresh(self);
-        self.emit("proxy-status-changed", &serde_json::to_value(&next).unwrap_or(Value::Null));
+        self.emit(
+            "proxy-status-changed",
+            &serde_json::to_value(&next).unwrap_or(Value::Null),
+        );
     }
 
     pub async fn start_proxy(self: &Arc<Self>) -> ProxyStatus {
         let state = self.clone();
         let port = state.port();
         let next = match state.proxy.start().await {
-            Ok(bound) => ProxyStatus { status: "running".to_string(), port: Some(bound), error: None },
-            Err(error) => ProxyStatus { status: "error".to_string(), port: Some(port), error: Some(error) },
+            Ok(bound) => ProxyStatus {
+                status: "running".to_string(),
+                port: Some(bound),
+                error: None,
+            },
+            Err(error) => ProxyStatus {
+                status: "error".to_string(),
+                port: Some(port),
+                error: Some(error),
+            },
         };
         state.set_proxy_status(next.clone());
         logger::info(
@@ -123,7 +180,11 @@ impl AppState {
 
     pub async fn stop_proxy(self: &Arc<Self>) -> ProxyStatus {
         self.proxy.stop().await;
-        let next = ProxyStatus { status: "stopped".to_string(), port: Some(self.port()), error: None };
+        let next = ProxyStatus {
+            status: "stopped".to_string(),
+            port: Some(self.port()),
+            error: None,
+        };
         self.set_proxy_status(next.clone());
         logger::info("[Proxy] 已停止", None);
         next
@@ -167,9 +228,9 @@ impl AppState {
         if !result.applied.is_empty() {
             // 顺手带上 daemon 死活：磁盘改完而 daemon 还在跑，用户看到的就是「改了没生效」，
             // 排查时这行日志能省一次困惑
-            let daemon_running = entries
-                .iter()
-                .any(|entry| entry.kind == "codex" && crate::clients::daemon::inspect(&entry.path).running);
+            let daemon_running = entries.iter().any(|entry| {
+                entry.kind == "codex" && crate::clients::daemon::inspect(&entry.path).running
+            });
             logger::info(
                 "[ClientDirs] 模型清单已随配置自动更新",
                 Some(&json!({
@@ -179,14 +240,19 @@ impl AppState {
             );
         }
         for (path, message) in result.errors {
-            logger::error("[ClientDirs] 模型清单自动更新失败", Some(&json!({ "path": path, "error": message })));
+            logger::error(
+                "[ClientDirs] 模型清单自动更新失败",
+                Some(&json!({ "path": path, "error": message })),
+            );
         }
     }
 
     // 配置变更的副作用：端口改了要按新端口重启、开机自启要同步给系统。
     // 放在这里而不是渲染层——托盘、设置页或以后别处改配置都走同一条路
     pub fn apply_config_effects(self: &Arc<Self>, previous: Option<&AppConfig>, next: &AppConfig) {
-        if previous.map(|config| config.settings.launch_at_login) != Some(next.settings.launch_at_login) {
+        if previous.map(|config| config.settings.launch_at_login)
+            != Some(next.settings.launch_at_login)
+        {
             if let Some(handle) = self.handle.get() {
                 use tauri_plugin_autostart::ManagerExt;
                 let manager = handle.autolaunch();
@@ -196,16 +262,26 @@ impl AppState {
                     manager.disable()
                 };
                 if let Err(error) = result {
-                    logger::warn("[App] 同步开机自启失败", Some(&json!({ "error": error.to_string() })));
+                    logger::warn(
+                        "[App] 同步开机自启失败",
+                        Some(&json!({ "error": error.to_string() })),
+                    );
                 }
             }
         }
 
         let port_changed = previous.map(|config| config.settings.port) != Some(next.settings.port);
-        let running = self.proxy_status.read().map(|status| status.status == "running").unwrap_or(false);
+        let running = self
+            .proxy_status
+            .read()
+            .map(|status| status.status == "running")
+            .unwrap_or(false);
         // 只有正在跑才需要重启；停着的话下次启动自然读新端口
         if port_changed && running {
-            logger::info("[Proxy] 端口变更，按新端口重启", Some(&json!({ "port": next.settings.port })));
+            logger::info(
+                "[Proxy] 端口变更，按新端口重启",
+                Some(&json!({ "port": next.settings.port })),
+            );
             let state = self.clone();
             tauri::async_runtime::spawn(async move {
                 let status = state.restart_proxy().await;
@@ -220,14 +296,46 @@ impl AppState {
 
         // 协议配置一变，已托管 codex 目录的模型清单就过期了——趁广播通知界面之前刷掉，
         // 界面随后重扫时看到的就是新结果，不会闪一个「不一致」出来
-        let protocols_changed = previous.map(|config| config.protocols != next.protocols).unwrap_or(true);
+        let protocols_changed = previous
+            .map(|config| config.protocols != next.protocols)
+            .unwrap_or(true);
+        let providers_changed = previous
+            .map(|config| config.providers != next.providers)
+            .unwrap_or(true);
+        let projects_changed = previous
+            .map(|config| {
+                config.settings.project_model_sync_enabled
+                    != next.settings.project_model_sync_enabled
+                    || config.settings.project_model_projects
+                        != next.settings.project_model_projects
+            })
+            .unwrap_or(true);
         if protocols_changed {
             self.sync_managed_codex_catalogs();
         }
+        if next.settings.project_model_sync_enabled
+            && (projects_changed || protocols_changed || providers_changed)
+        {
+            self.sync_all_project_models_locked(next);
+        }
     }
 
-    // 所有配置变更的唯一出口
-    pub fn apply_config(self: &Arc<Self>, next: &Value) -> Result<(AppConfig, Vec<String>), String> {
+    // 所有配置变更的唯一出口。事务锁串行化完整配置的读取、保存和副作用。
+    pub fn apply_config(
+        self: &Arc<Self>,
+        next: &Value,
+    ) -> Result<(AppConfig, Vec<String>), String> {
+        let _guard = self
+            .config_transaction
+            .lock()
+            .map_err(|_| "配置事务锁不可用".to_string())?;
+        self.apply_config_locked(next)
+    }
+
+    pub(super) fn apply_config_locked(
+        self: &Arc<Self>,
+        next: &Value,
+    ) -> Result<(AppConfig, Vec<String>), String> {
         let previous = self.config.read().ok().map(|config| config.clone());
         let (config, issues) = self.config_manager.save(next)?;
         if let Ok(mut slot) = self.config.write() {
@@ -259,8 +367,15 @@ impl AppState {
     }
 
     // 手动目录的增删、扫描剔除、kind 矫正都改的是配置，统一从这条口落盘
-    pub fn persist_client_dirs(self: &Arc<Self>, dirs: Vec<crate::config::ClientDir>) -> Result<(), String> {
-        let mut draft = self.config.read().map_err(|_| "配置不可读".to_string())?.clone();
+    pub fn persist_client_dirs(
+        self: &Arc<Self>,
+        dirs: Vec<crate::config::ClientDir>,
+    ) -> Result<(), String> {
+        let mut draft = self
+            .config
+            .read()
+            .map_err(|_| "配置不可读".to_string())?
+            .clone();
         draft.settings.client_dirs = dirs;
         let value = serde_json::to_value(&draft).map_err(|error| error.to_string())?;
         self.apply_config(&value)?;
@@ -270,7 +385,9 @@ impl AppState {
     // 重新生成客户端 token：与 persist_client_dirs 一样走 apply_config 落盘并广播。
     // 原本就配好（地址与 token 都对）的目录属于「被换 token 连坐」，自动跟着写入新值；
     // 原本就不一致的本来就要人工处理，不趁机动它——所以 ok 名单必须按旧 token 先扫出来
-    pub fn regenerate_client_token(self: &Arc<Self>) -> Result<(AppConfig, Vec<String>, Vec<Value>), String> {
+    pub fn regenerate_client_token(
+        self: &Arc<Self>,
+    ) -> Result<(AppConfig, Vec<String>, Vec<Value>), String> {
         let before = self.config_snapshot();
         let scan = scan_client_dirs(None, &before.settings.client_dirs);
         let mut entries = scan.builtin;
@@ -283,7 +400,8 @@ impl AppState {
                     &before.settings.client_token,
                     Vec::new(),
                 );
-                crate::clients::inspect_client_config(&entry.path, &entry.kind, &context).status == "ok"
+                crate::clients::inspect_client_config(&entry.path, &entry.kind, &context).status
+                    == "ok"
             })
             .collect();
 
@@ -327,4 +445,3 @@ impl AppState {
         Ok((config, reapplied, errors))
     }
 }
-
