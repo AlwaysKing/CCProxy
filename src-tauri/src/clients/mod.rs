@@ -8,9 +8,9 @@ pub mod daemon;
 pub mod dirs;
 pub mod json;
 pub mod toml;
+pub mod write;
 
 pub use apply::{apply_client_config, sync_codex_catalogs};
 pub use catalog::expected_catalog_entries;
 pub use check::inspect_client_config;
 pub use dirs::{detect_dir_kind, scan_client_dirs};
-
