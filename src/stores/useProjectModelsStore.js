@@ -100,8 +100,8 @@ export const useProjectModelsStore = defineStore('projectModels', () => {
     try {
       const result = await window.electronAPI.setProjectModel(project.path, client, model)
       if (!result.success) throw new Error(result.error || '保存项目模型失败')
-      if (result.status?.message) notice.value = result.status.message
       await reload()
+      if (result.status?.message) notice.value = result.status.message
       return true
     } catch (error) {
       notice.value = error.message || '保存项目模型失败'

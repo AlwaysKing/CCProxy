@@ -132,3 +132,79 @@ fn enabling_project_sync_writes_existing_bindings() {
         "model = \"codex-a\"\n"
     );
 }
+
+#[test]
+fn two_projects_cannot_bind_the_same_claude_settings_file() {
+    let repo = TempDir::new("ccproxy-state-claude-repo");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo.path)
+        .status()
+        .unwrap();
+    let first = repo.join("first");
+    let second = repo.join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let config = config_from(json!({
+        "settings": {
+            "projectModelSyncEnabled": true,
+            "projectModelProjects": [
+                {
+                    "id": "p1",
+                    "path": first.to_string_lossy(),
+                    "claudeModel": "claude-a",
+                    "manual": true
+                },
+                {
+                    "id": "p2",
+                    "path": second.to_string_lossy(),
+                    "claudeModel": null,
+                    "manual": true
+                }
+            ]
+        },
+        "providers": [{
+            "id": "p1",
+            "name": "provider",
+            "enabled": true,
+            "baseUrl": "https://example.com",
+            "token": "sk-test",
+            "modelGroups": [{
+                "id": "g1",
+                "apiFormat": "anthropic",
+                "models": [{ "name": "real-claude" }]
+            }]
+        }],
+        "protocols": [{
+            "id": "anthropic",
+            "name": "Anthropic",
+            "enabled": true,
+            "mappings": [{
+                "id": "m1",
+                "enabled": true,
+                "clientModel": "claude-a",
+                "providerId": "p1",
+                "modelGroupId": "g1",
+                "upstreamProtocol": "anthropic",
+                "realModel": "real-claude"
+            }]
+        }]
+    }));
+    let state_dir = TempDir::new("ccproxy-state-config");
+    let state = test_state(config, &state_dir);
+    state
+        .set_project_model(&first.to_string_lossy(), "claude", "claude-a")
+        .unwrap();
+
+    let error = state
+        .set_project_model(&second.to_string_lossy(), "claude", "claude-a")
+        .unwrap_err();
+    assert!(error.contains("同一个 Claude"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(repo.join(".claude/settings.local.json")).unwrap()
+        )
+        .unwrap(),
+        json!({ "model": "claude-a" })
+    );
+}

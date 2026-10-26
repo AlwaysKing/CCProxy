@@ -1,5 +1,6 @@
 // 项目模型状态层：配置事务、运行时同步状态和项目级 Tauri 操作。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -7,8 +8,8 @@ use serde_json::json;
 
 use super::{AppState, ProjectModelRow, ProjectModelsView, ProjectSyncStatusSnapshot};
 use crate::clients::project_models::{
-    apply_project_model, discover_default_projects, merge_project_list, project_model_candidates,
-    ProjectSyncResult, ProjectSyncState,
+    apply_project_model, claude_settings_root, discover_default_projects, merge_project_list,
+    project_model_candidates, ProjectSyncResult, ProjectSyncState,
 };
 use crate::config::{create_config_id, AppConfig, ProjectModelProject};
 use crate::logger;
@@ -73,6 +74,7 @@ impl AppState {
             .codex_daemon()
             .filter(|daemon| daemon.running)
             .and_then(|daemon| daemon.pid);
+        let mut claude_roots: HashMap<PathBuf, String> = HashMap::new();
         for project in &config.settings.project_model_projects {
             if let Some(model) = project
                 .codex_model
@@ -97,6 +99,25 @@ impl AppState {
                 .as_deref()
                 .filter(|model| !model.is_empty())
             {
+                let root = std::fs::canonicalize(claude_settings_root(&project.path))
+                    .unwrap_or_else(|_| claude_settings_root(&project.path));
+                if let Some(owner) = claude_roots.get(&root) {
+                    self.record_project_sync(
+                        &project.id,
+                        "claude",
+                        ProjectSyncResult {
+                            status: ProjectSyncState::BindingInvalid,
+                            file: None,
+                            changed: false,
+                            message: Some(format!(
+                                "与项目 {owner} 共用同一个 Claude settings.local.json，已跳过"
+                            )),
+                        },
+                        None,
+                    );
+                    continue;
+                }
+                claude_roots.insert(root, project.path.clone());
                 let result = apply_project_model(config, &project.path, "claude", model);
                 if result.status != ProjectSyncState::Ok {
                     logger::warn(
@@ -292,6 +313,29 @@ impl AppState {
         };
         let value = model.trim();
         let value = (!value.is_empty()).then(|| value.to_string());
+        if client == "claude" && value.is_some() {
+            let target_root =
+                claude_settings_root(&draft.settings.project_model_projects[index].path);
+            let target_root = std::fs::canonicalize(&target_root).unwrap_or(target_root);
+            if let Some(owner) = draft
+                .settings
+                .project_model_projects
+                .iter()
+                .find(|project| {
+                    project.id != draft.settings.project_model_projects[index].id
+                        && project.claude_model.is_some()
+                        && {
+                            let root = claude_settings_root(&project.path);
+                            std::fs::canonicalize(&root).unwrap_or(root) == target_root
+                        }
+                })
+            {
+                return Err(format!(
+                    "项目 {} 与 {} 使用同一个 Claude settings.local.json，请先清除另一个项目的 Claude 绑定",
+                    draft.settings.project_model_projects[index].path, owner.path
+                ));
+            }
+        }
         if client == "codex" {
             draft.settings.project_model_projects[index].codex_model = value;
         } else {
@@ -299,8 +343,14 @@ impl AppState {
         }
         let project_id = draft.settings.project_model_projects[index].id.clone();
         let config = self.save_project_draft_locked(&draft)?;
-        // 即使只切同一行的另一侧，配置可能没有发生差异；绑定操作本身仍要立即同步。
-        self.sync_all_project_models_locked(&config);
+        // 改变绑定会走配置副作用同步；只有内容完全相同、没有触发副作用时才补一次。
+        let has_status = self
+            .project_sync_status
+            .read()
+            .is_ok_and(|statuses| statuses.contains_key(&(project_id.clone(), client.to_string())));
+        if !has_status {
+            self.sync_all_project_models_locked(&config);
+        }
         if let Some(status) = self
             .project_sync_status
             .read()
@@ -340,6 +390,12 @@ impl AppState {
         } else {
             let target =
                 std::fs::canonicalize(path).map_err(|error| format!("项目目录不可用：{error}"))?;
+            if !discover_default_projects()
+                .iter()
+                .any(|project| same_project_path(&project.path, &target.to_string_lossy()))
+            {
+                return Err("项目目录不在自动发现或手动添加列表中".to_string());
+            }
             draft
                 .settings
                 .project_model_projects

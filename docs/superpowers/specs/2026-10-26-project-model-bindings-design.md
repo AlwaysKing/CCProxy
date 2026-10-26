@@ -15,7 +15,7 @@ CCProxy 增加可开关的“项目模型”功能：按项目工作目录统一
 | 管理粒度 | 一个项目目录一行，分别设置 Codex 与 Claude Code 模型 |
 | 职责边界 | 只写默认模型，不写 `base_url`、token、provider 或 Codex 模型清单 |
 | Codex 目标 | `<项目>/.codex/config.toml` 顶层 `model` |
-| Claude 目标 | `<项目>/.claude/settings.local.json` 根节点 `model` |
+| Claude 目标 | Claude 实际使用的 `.claude/settings.local.json` 根节点 `model`；Git 子目录归到仓库根，worktree 归到主 checkout |
 | 默认状态 | 功能默认关闭 |
 | 关闭语义 | 保留绑定和已写入文件，只停止自动发现与后续同步 |
 | 开启语义 | 对全部有效绑定执行一次同步 |
@@ -23,6 +23,7 @@ CCProxy 增加可开关的“项目模型”功能：按项目工作目录统一
 | 项目来源 | 自动发现与手动添加并存，合并后每个路径只出现一行 |
 | 自动发现展示 | 未绑定项目直接进入列表，模型栏留空，不写任何文件 |
 | 映射失效 | 不覆盖磁盘上的旧 `model`，绑定标为失效并停止该字段同步 |
+| 共享 Claude 配置 | 多个项目解析到同一个 `settings.local.json` 时，只允许一个 Claude 绑定，避免后写覆盖前写 |
 | 界面入口 | 顶部新增“项目模型”页 |
 | 配置位置 | 继续使用 `~/.ccproxy/app.json` |
 
@@ -114,6 +115,7 @@ v5 到 v6 的迁移只新增项目模型设置，不重新排序映射。迁移�
 扫描 `~/.codex/sessions/**/*.jsonl`。每个文件流式读取到第一条 `session_meta` 为止，使用
 `payload.cwd` 作为项目路径；找到后不再读取正文。`payload.timestamp` 是会话开始时间，
 因此最近活动时间统一取会话文件的 `mtime`，避免长会话和恢复会话排序失真。
+遍历时跳过软链接文件和目录，避免历史目录里的链接造成循环或越界读取。
 
 ### Claude Code
 
@@ -129,6 +131,7 @@ timestamp 可能是整数毫秒，项目事件里可能是 ISO 字符串；发�
 - 持久化绑定即使目录暂时消失仍保留，并显示“目录不存在”，不会被自动清除。
 - 排序依次为：有绑定的项目、最近活动时间、路径。
 - 被隐藏的自动发现项目仍可重新发现，但普通列表不显示。
+- 自动发现遍历跳过软链接文件和目录。
 
 ## 写入引擎
 
@@ -150,13 +153,17 @@ timestamp 可能是整数毫秒，项目事件里可能是 ISO 字符串；发�
 
 ### Claude Code
 
-只改项目根目录 `.claude/settings.local.json` 根节点的 `model`：
+只改 Claude 实际作用域的 `.claude/settings.local.json` 根节点 `model`：
 
 - 复用 JSON 局部编辑能力，保留缩进、键序、转义、行尾及其他字段。
 - 文件不存在时创建 `.claude/` 和最小 JSON。
 - 文件不是合法 JSON 时拒绝写入。
+- Git 子目录按仓库根解析，worktree 按主 checkout 解析；多个项目解析到同一文件时只允许
+  一个有效 Claude 绑定。
 
 两个路径都使用临时文件加 rename 原子替换；目标是软链接时改写真实文件并保留链接。
+项目模型属于自动写入，比手工“应用”多一道边界检查：目标文件或任一父目录的软链接解析后
+必须仍位于对应项目作用域内；越界时拒绝写入并标为 `config_unreadable`。
 
 ## 同步流程
 
@@ -180,6 +187,7 @@ timestamp 可能是整数毫秒，项目事件里可能是 ISO 字符串；发�
 | 状态 | 行为 |
 |---|---|
 | `ok` | 配置中的模型与期望值一致 |
+| `sync_disabled` | 功能关闭；只保存绑定，不执行写入 |
 | `binding_invalid` | 映射已停用、删除或不再精确存在；不写文件 |
 | `project_missing` | 项目目录不存在；不写文件 |
 | `config_unreadable` | 项目配置损坏或无权限；不写文件 |
@@ -189,6 +197,8 @@ timestamp 可能是整数毫秒，项目事件里可能是 ISO 字符串；发�
 Codex 与 Claude Code 两侧独立执行。任一侧失败不阻止另一侧成功，也不阻止其他项目继续同步。
 
 已运行的客户端通常到新会话才读取新的默认模型。页面需要显示这个生效条件。
+Codex 只加载受信任项目里的 `.codex/config.toml`，页面需要持续提示项目信任前提。CCProxy
+新建的项目配置可能成为 Git 未跟踪文件，页面也需要提示提交前检查。
 
 同步状态是运行时数据，不写入 `app.json`。`AppState` 按 `(projectId, client)` 保存最近状态、
 时间与错误；项目或来源被删除时一并清理。Codex 的 daemon 检测读取 `CODEX_HOME`（未设置时为

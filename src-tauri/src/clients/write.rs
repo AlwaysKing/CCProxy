@@ -69,6 +69,39 @@ fn backup_file(target_path: &Path) -> Option<String> {
     Some(backup_path.to_string_lossy().to_string())
 }
 
+pub fn ensure_write_within(root: &Path, target: &Path) -> Result<(), String> {
+    let root =
+        fs::canonicalize(root).map_err(|error| format!("项目目录不可用，拒绝写入：{error}"))?;
+    let mut ancestor = target;
+    let canonical_ancestor = loop {
+        if ancestor.exists() {
+            break fs::canonicalize(ancestor)
+                .map_err(|error| format!("项目配置路径不可用，拒绝写入：{error}"))?;
+        }
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| "项目配置路径没有可用的父目录".to_string())?;
+    };
+    let relative = target
+        .strip_prefix(ancestor)
+        .map_err(|_| "项目配置路径不在项目目录内".to_string())?;
+    let resolved = canonical_ancestor.join(relative);
+    if !resolved.starts_with(&root) {
+        return Err("项目配置目标越过项目目录，已拒绝写入".to_string());
+    }
+    Ok(())
+}
+
+pub fn write_if_changed_within(
+    root: &Path,
+    file_path: &Path,
+    text: &str,
+    changed: bool,
+) -> Result<WriteResult, String> {
+    ensure_write_within(root, file_path)?;
+    write_if_changed(file_path, text, changed)
+}
+
 pub fn write_if_changed(
     file_path: &Path,
     text: &str,

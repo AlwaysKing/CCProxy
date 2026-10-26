@@ -257,6 +257,17 @@ onMounted(() => {
         <strong>生效方式</strong>
         <span>已运行的客户端通常要到新会话才读取新的默认模型。</span>
       </div>
+      <div>
+        <strong>Codex 项目信任</strong>
+        <span>Codex 只会加载受信任项目的 <code>.codex/config.toml</code>；项目未受信任时文件会写入，但不会生效。</span>
+      </div>
+      <div>
+        <strong>Git 工作区</strong>
+        <span>
+          CCProxy 可能新建未跟踪的 <code>.codex/config.toml</code> 或
+          <code>.claude/settings.local.json</code>；提交前请检查团队是否需要共享这个模型选择。
+        </span>
+      </div>
       <div v-if="store.daemon?.running" class="daemon-note">
         <strong>Codex app-server 正在运行</strong>
         <span>

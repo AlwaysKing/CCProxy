@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::Command;
+use std::time::UNIX_EPOCH;
 
 use chrono::{DateTime, NaiveDateTime};
 use serde::Serialize;
@@ -12,7 +13,7 @@ use serde_json::Value;
 
 use crate::clients::apply::rewrite_codex_model;
 use crate::clients::json::set_object_values;
-use crate::clients::write::write_if_changed;
+use crate::clients::write::{ensure_write_within, write_if_changed_within};
 use crate::config::AppConfig;
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
@@ -83,13 +84,6 @@ impl ProjectSyncResult {
     }
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 fn file_mtime_ms(path: &Path) -> Option<i64> {
     fs::metadata(path)
         .ok()?
@@ -139,9 +133,17 @@ fn visit_jsonl_files(root: &Path, visit: &mut impl FnMut(&Path)) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             visit_jsonl_files(&path, visit);
-        } else if path.extension().and_then(|value| value.to_str()) == Some("jsonl") {
+        } else if file_type.is_file()
+            && path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+        {
             visit(&path);
         }
     }
@@ -413,10 +415,51 @@ fn binding_is_valid(config: &AppConfig, client: &str, model: &str) -> bool {
     })
 }
 
-fn project_config(client: &str, root: &Path) -> (PathBuf, &'static str) {
+fn git_path(root: &Path, args: &[&str]) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+pub fn claude_settings_root(project_path: &str) -> PathBuf {
+    let root = fs::canonicalize(project_path).unwrap_or_else(|_| PathBuf::from(project_path));
+    if let Some(common_dir) = git_path(
+        &root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) {
+        if common_dir.file_name().and_then(|value| value.to_str()) == Some(".git") {
+            if let Some(main_checkout) = common_dir.parent() {
+                return main_checkout.to_path_buf();
+            }
+        }
+    }
+    git_path(&root, &["rev-parse", "--show-toplevel"]).unwrap_or(root)
+}
+
+fn project_config(client: &str, root: &Path) -> (PathBuf, &'static str, PathBuf) {
     match client {
-        "codex" => (root.join(".codex").join("config.toml"), ""),
-        _ => (root.join(".claude").join("settings.local.json"), "{}\n"),
+        "codex" => (
+            root.join(".codex").join("config.toml"),
+            "",
+            root.to_path_buf(),
+        ),
+        _ => {
+            let claude_root = claude_settings_root(&root.to_string_lossy());
+            (
+                claude_root.join(".claude").join("settings.local.json"),
+                "{}\n",
+                claude_root,
+            )
+        }
     }
 }
 
@@ -440,7 +483,7 @@ pub fn apply_project_model(
         return ProjectSyncResult::status(ProjectSyncState::ProjectMissing, "项目目录不存在");
     }
 
-    let (file_path, empty) = project_config(client, root);
+    let (file_path, empty, write_root) = project_config(client, root);
     let original = match fs::read_to_string(&file_path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => empty.to_string(),
@@ -471,6 +514,9 @@ pub fn apply_project_model(
         }
     };
 
+    if let Err(error) = ensure_write_within(&write_root, &file_path) {
+        return ProjectSyncResult::status(ProjectSyncState::ConfigUnreadable, error);
+    }
     if next.1 {
         if let Some(parent) = file_path.parent() {
             if let Err(error) = fs::create_dir_all(parent) {
@@ -481,7 +527,7 @@ pub fn apply_project_model(
             }
         }
     }
-    match write_if_changed(&file_path, &next.0, next.1) {
+    match write_if_changed_within(&write_root, &file_path, &next.0, next.1) {
         Ok(result) => ProjectSyncResult {
             status: ProjectSyncState::Ok,
             file: Some(result.file),
@@ -490,8 +536,4 @@ pub fn apply_project_model(
         },
         Err(error) => ProjectSyncResult::status(ProjectSyncState::WriteFailed, error),
     }
-}
-
-pub fn project_sync_timestamp_ms() -> i64 {
-    now_ms()
 }

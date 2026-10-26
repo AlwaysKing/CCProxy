@@ -371,6 +371,10 @@ impl AppState {
         self: &Arc<Self>,
         dirs: Vec<crate::config::ClientDir>,
     ) -> Result<(), String> {
+        let _guard = self
+            .config_transaction
+            .lock()
+            .map_err(|_| "配置事务锁不可用".to_string())?;
         let mut draft = self
             .config
             .read()
@@ -378,7 +382,7 @@ impl AppState {
             .clone();
         draft.settings.client_dirs = dirs;
         let value = serde_json::to_value(&draft).map_err(|error| error.to_string())?;
-        self.apply_config(&value)?;
+        self.apply_config_locked(&value)?;
         Ok(())
     }
 
@@ -388,6 +392,10 @@ impl AppState {
     pub fn regenerate_client_token(
         self: &Arc<Self>,
     ) -> Result<(AppConfig, Vec<String>, Vec<Value>), String> {
+        let _guard = self
+            .config_transaction
+            .lock()
+            .map_err(|_| "配置事务锁不可用".to_string())?;
         let before = self.config_snapshot();
         let scan = scan_client_dirs(None, &before.settings.client_dirs);
         let mut entries = scan.builtin;
@@ -408,7 +416,7 @@ impl AppState {
         let mut draft = before.clone();
         draft.settings.client_token = create_client_token();
         let value = serde_json::to_value(&draft).map_err(|error| error.to_string())?;
-        let (config, _) = self.apply_config(&value)?;
+        let (config, _) = self.apply_config_locked(&value)?;
         logger::info("[Config] 已重新生成客户端 token", None);
 
         let catalog = self.codex_catalog(&config);

@@ -3,7 +3,8 @@
 use serde_json::json;
 
 use ccproxy_lib::clients::project_models::{
-    apply_project_model, discover_projects, project_model_candidates, ProjectSyncState,
+    apply_project_model, claude_settings_root, discover_projects, project_model_candidates,
+    ProjectSyncState,
 };
 use ccproxy_lib::config::AppConfig;
 
@@ -162,6 +163,48 @@ fn claude_binding_creates_only_the_project_model() {
 }
 
 #[test]
+fn claude_binding_preserves_existing_settings_and_leaves_a_backup() {
+    let project = TempDir::new("ccproxy-project-claude-existing");
+    let before =
+        "{\n  \"permissions\": { \"allow\": [\"Bash(ls:*)\"] },\n  \"model\": \"old\"\n}\n";
+    project.write(".claude/settings.local.json", before);
+    let result = apply_project_model(
+        &routing_config(),
+        &project.path_string(),
+        "claude",
+        "claude-alias",
+    );
+    assert_eq!(result.status, ProjectSyncState::Ok);
+    let written: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude/settings.local.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(written["model"], "claude-alias");
+    assert_eq!(written["permissions"]["allow"][0], "Bash(ls:*)");
+    assert_eq!(
+        std::fs::read_to_string(project.join(".claude/settings.local.json.ccproxy-bak")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn claude_binding_refuses_broken_json_without_touching_it() {
+    let project = TempDir::new("ccproxy-project-claude-broken");
+    project.write(".claude/settings.local.json", "{ broken");
+    let result = apply_project_model(
+        &routing_config(),
+        &project.path_string(),
+        "claude",
+        "claude-alias",
+    );
+    assert_eq!(result.status, ProjectSyncState::ConfigUnreadable);
+    assert_eq!(
+        std::fs::read_to_string(project.join(".claude/settings.local.json")).unwrap(),
+        "{ broken"
+    );
+}
+
+#[test]
 fn invalid_mapping_never_overwrites_the_existing_model() {
     let project = TempDir::new("ccproxy-project-invalid");
     project.write(".codex/config.toml", "model = \"existing\"\n");
@@ -191,4 +234,111 @@ fn missing_project_is_reported_without_creating_directories() {
     );
     assert_eq!(result.status, ProjectSyncState::ProjectMissing);
     assert!(!missing.exists());
+}
+
+#[test]
+fn claude_uses_the_git_root_for_a_nested_working_directory() {
+    let repo = TempDir::new("ccproxy-project-repo");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo.path)
+        .status()
+        .unwrap();
+    let nested = repo.join("crates/app");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    assert_eq!(
+        std::fs::canonicalize(claude_settings_root(&nested.to_string_lossy())).unwrap(),
+        std::fs::canonicalize(&repo.path).unwrap()
+    );
+    let result = apply_project_model(
+        &routing_config(),
+        &nested.to_string_lossy(),
+        "claude",
+        "claude-alias",
+    );
+    assert_eq!(result.status, ProjectSyncState::Ok);
+    assert!(repo.join(".claude/settings.local.json").exists());
+    assert!(!nested.join(".claude/settings.local.json").exists());
+}
+
+#[test]
+fn claude_worktree_uses_the_main_checkout_settings_file() {
+    let container = TempDir::new("ccproxy-project-worktree-container");
+    let repo = container.join("main");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::fs::write(repo.join("README.md"), "fixture\n").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=CCProxy Test",
+            "-c",
+            "user.email=ccproxy@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    let worktree = container.join("worktree");
+    std::process::Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            worktree.to_string_lossy().as_ref(),
+            "-b",
+            "feature/worktree-test",
+        ])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    let nested = worktree.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    assert_eq!(
+        std::fs::canonicalize(claude_settings_root(&nested.to_string_lossy())).unwrap(),
+        std::fs::canonicalize(&repo).unwrap()
+    );
+    let result = apply_project_model(
+        &routing_config(),
+        &nested.to_string_lossy(),
+        "claude",
+        "claude-alias",
+    );
+    assert_eq!(result.status, ProjectSyncState::Ok);
+    assert!(repo.join(".claude/settings.local.json").exists());
+    assert!(!worktree.join(".claude/settings.local.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn project_sync_refuses_a_symlinked_config_directory_outside_the_project() {
+    let project = TempDir::new("ccproxy-project-symlink");
+    let outside = TempDir::new("ccproxy-project-outside");
+    outside.write("settings.local.json", "{\n  \"keep\": true\n}\n");
+    std::os::unix::fs::symlink(&outside.path, project.join(".claude")).unwrap();
+
+    let result = apply_project_model(
+        &routing_config(),
+        &project.path_string(),
+        "claude",
+        "claude-alias",
+    );
+    assert_eq!(result.status, ProjectSyncState::ConfigUnreadable);
+    assert_eq!(
+        std::fs::read_to_string(outside.join("settings.local.json")).unwrap(),
+        "{\n  \"keep\": true\n}\n"
+    );
 }
