@@ -3,19 +3,10 @@
 import { computed, onMounted, onUnmounted } from 'vue'
 import { useProjectModelsStore } from '@/stores/useProjectModelsStore'
 import { AppSelect, Badge, BaseButton, BaseInput, EmptyState } from '@/components/base'
+import ProjectStatusIcon from './components/ProjectStatusIcon.vue'
 
 const store = useProjectModelsStore()
 let unsubscribe = null
-
-const STATUS_META = {
-  ok: { label: '已同步', variant: 'success' },
-  binding_invalid: { label: '绑定失效', variant: 'warning' },
-  project_missing: { label: '目录不存在', variant: 'warning' },
-  config_unreadable: { label: '配置不可读', variant: 'error' },
-  write_failed: { label: '写入失败', variant: 'error' },
-  restart_required: { label: '待重启 Codex', variant: 'warning' },
-  requires_project_trust: { label: '需信任项目', variant: 'warning' }
-}
 
 const sourceLabels = computed(() => (project) => {
   const labels = []
@@ -36,16 +27,10 @@ function statusFor(project, client) {
   return project[`${client}Status`]
 }
 
-function statusMeta(project, client) {
-  const status = statusFor(project, client)
-  if (!status) return null
-  return STATUS_META[status.status] || { label: status.status, variant: 'default' }
-}
-
 function optionsFor(project, client) {
   const candidates = store.candidates[client] || []
   const options = [
-    { value: '', label: '不设置（停止托管）' },
+    { value: '', label: '未设置', menuLabel: '不设置（停止托管）' },
     ...candidates.map((candidate) => ({
       value: candidate.mappingId,
       label: candidate.model
@@ -140,43 +125,35 @@ onUnmounted(() => {
               </div>
             </td>
             <td>
-              <div class="model-cell">
+              <div class="model-cell" :class="{ 'is-unset': !mappingIdFor(project, 'claude') }">
                 <AppSelect
                   :model-value="mappingIdFor(project, 'claude')"
                   :options="optionsFor(project, 'claude')"
                   :disabled="selectDisabled(project, 'claude')"
-                  full-width
+                  menu-min-width="360px"
                   @update:model-value="onModelChange(project, 'claude', $event)"
                 />
-                <div
-                  v-if="statusMeta(project, 'claude')"
-                  class="model-status"
-                  :title="statusFor(project, 'claude')?.message || ''"
-                >
-                  <Badge :variant="statusMeta(project, 'claude').variant" size="sm">
-                    {{ statusMeta(project, 'claude').label }}
-                  </Badge>
-                </div>
+                <ProjectStatusIcon
+                  v-if="statusFor(project, 'claude')"
+                  client="claude"
+                  :status="statusFor(project, 'claude')"
+                />
               </div>
             </td>
             <td>
-              <div class="model-cell">
+              <div class="model-cell" :class="{ 'is-unset': !mappingIdFor(project, 'codex') }">
                 <AppSelect
                   :model-value="mappingIdFor(project, 'codex')"
                   :options="optionsFor(project, 'codex')"
                   :disabled="selectDisabled(project, 'codex')"
-                  full-width
+                  menu-min-width="360px"
                   @update:model-value="onModelChange(project, 'codex', $event)"
                 />
-                <div
-                  v-if="statusMeta(project, 'codex')"
-                  class="model-status"
-                  :title="statusFor(project, 'codex')?.message || ''"
-                >
-                  <Badge :variant="statusMeta(project, 'codex').variant" size="sm">
-                    {{ statusMeta(project, 'codex').label }}
-                  </Badge>
-                </div>
+                <ProjectStatusIcon
+                  v-if="statusFor(project, 'codex')"
+                  client="codex"
+                  :status="statusFor(project, 'codex')"
+                />
               </div>
             </td>
           </tr>
@@ -265,8 +242,17 @@ onUnmounted(() => {
   width: min(360px, 45vw);
 }
 
+.data-table {
+  table-layout: fixed;
+}
+
+.data-table th:nth-child(2),
+.data-table th:nth-child(3) {
+  width: 25%;
+}
+
 .project-cell {
-  width: 46%;
+  width: 50%;
   max-width: 0;
 }
 
@@ -294,16 +280,29 @@ onUnmounted(() => {
 }
 
 .model-cell {
-  min-width: 210px;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  min-width: 0;
 }
 
 .model-cell :deep(.app-select) {
-  min-width: 190px;
+  flex: 0 1 250px;
+  width: min(250px, 100%);
+  min-width: 0;
 }
 
-.model-status {
-  display: flex;
-  margin-top: 5px;
+.model-cell.is-unset :deep(.app-select-trigger) {
+  border-style: dashed;
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.model-cell.is-unset :deep(.app-select-trigger:hover),
+.model-cell.is-unset :deep(.app-select.open .app-select-trigger) {
+  border-style: solid;
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .row-missing .project-cell > code {

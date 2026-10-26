@@ -15,8 +15,8 @@ import ProjectsView from '@/views/projects/ProjectsView.vue'
 
 // 页面入口。模型映射页内部再切换客户端协议。
 const VIEW_ITEMS = [
-  { key: 'projects', label: '项目管理' },
   { key: 'providers', label: '模型映射' },
+  { key: 'projects', label: '项目管理' },
   { key: 'logs', label: '请求日志' },
   { key: 'usage', label: '用量统计' },
   { key: 'settings', label: '设置' }

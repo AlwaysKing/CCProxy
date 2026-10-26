@@ -183,6 +183,7 @@ onBeforeUnmount(() => {
       class="app-select-trigger"
       :class="{ 'is-placeholder': !selectedOption && !selectedLabel }"
       :disabled="disabled"
+      :title="triggerLabel"
       @click="toggle"
     >
       <span class="app-select-label">{{ triggerLabel }}</span>
@@ -205,6 +206,7 @@ onBeforeUnmount(() => {
               class="app-select-option"
               :class="{ active: option.value === modelValue, disabled: option.disabled }"
               :disabled="option.disabled"
+              :title="option.menuLabel || option.label"
               @click="selectOption(option)"
             >
               <span class="app-select-option-label">{{ option.menuLabel || option.label }}</span>
@@ -221,6 +223,7 @@ onBeforeUnmount(() => {
             class="app-select-option"
             :class="{ active: option.value === modelValue, disabled: option.disabled }"
             :disabled="option.disabled"
+            :title="option.menuLabel || option.label"
             @click="selectOption(option)"
           >
             <span class="app-select-option-label">{{ option.menuLabel || option.label }}</span>
