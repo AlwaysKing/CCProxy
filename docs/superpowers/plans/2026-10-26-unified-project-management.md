@@ -28,7 +28,7 @@ The Vue page consumes that view from the main navigation and no longer opens a p
 - `src/api/tauriBridge.js`: unified command bridge.
 - `src/stores/useProjectModelsStore.js`: unified page state and set/refresh actions.
 - `src/views/projects/ProjectsView.vue`: project table with two model selects.
-- `src/App.vue`: add “项目管理” before “模型映射”; remove subwindow route.
+- `src/App.vue`: add “项目管理” after “模型映射”; remove subwindow route.
 - `src/views/providers/components/MappingModule.vue`: remove per-row project icon and window call.
 
 ### Task 1: Route-Effective Model Candidates
@@ -527,13 +527,13 @@ Return only `view`, `loading`, `notice`, `search`, `candidates`, `projects`, `fi
 
 The header has title “项目管理”, explanatory text, and one “刷新项目” button. The table has exactly
 three columns: 项目, Claude 默认模型, Codex 默认模型. Each model cell contains an `AppSelect` and that
-client’s status badge.
+client’s inline status icon.
 
 ```js
 function optionsFor(project, client) {
   const list = store.candidates[client] || []
   const options = [
-    { value: '', label: '不设置（停止托管）' },
+    { value: '', label: '未设置', menuLabel: '不设置（停止托管）' },
     ...list.map(item => ({ value: item.mappingId, label: item.model }))
   ]
   const mappingId = project[`${client}MappingId`]
@@ -554,7 +554,7 @@ option's primitive value there, while its `change` event emits the whole option 
 select enabled for an offline existing binding of that same client; disable the other client's
 select for a missing project because the backend rejects creating a new offline binding. Disable
 only the select currently operated on via `store.isPending`. Show `sources` as Codex/Claude badges,
-an unavailable-directory warning, and status beneath each select. No add/edit/delete controls. Use
+an unavailable-directory warning, and an inline status icon after each select. No add/edit/delete controls. Use
 the project path as the row key.
 
 `store.setModel` sends `mappingId || null` to the bridge so an empty select value becomes Rust
@@ -601,8 +601,8 @@ Add unit tests inside `state/project_models.rs` for both trust directions.
 
 ```js
 const VIEW_ITEMS = [
-  { key: 'projects', label: '项目管理' },
   { key: 'providers', label: '模型映射' },
+  { key: 'projects', label: '项目管理' },
   { key: 'logs', label: '请求日志' },
   { key: 'usage', label: '用量统计' },
   { key: 'settings', label: '设置' }
