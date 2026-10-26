@@ -58,6 +58,7 @@ export function installTauriBridge() {
     applyClientDir: (dirPath) => invoke('apply_client_dir', { path: dirPath }),
     removeClientDir: (dirId) => invoke('remove_client_dir', { id: dirId }),
     getProjectModels: () => invoke('get_project_models'),
+    openProjectModelsWindow: () => invoke('open_project_models_window'),
     refreshProjectModels: () => invoke('refresh_project_models'),
     setProjectSyncEnabled: (enabled) => invoke('set_project_sync_enabled', { enabled }),
     pickProjectDir: () => invoke('pick_project_dir'),

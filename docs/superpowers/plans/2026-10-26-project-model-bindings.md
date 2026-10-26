@@ -246,7 +246,7 @@ git add src-tauri/src/state.rs src-tauri/src/commands.rs src-tauri/src/lib.rs sr
 git commit -m "feat: wire project model synchronization"
 ```
 
-### Task 5: Build the project model page
+### Task 5: Build the project model settings entry and child window
 
 **Files:**
 - Create: `src/views/projects/ProjectsView.vue`
@@ -263,9 +263,11 @@ Expose all project-model commands and keep merged rows, candidates, statuses, lo
 
 Add the toggle, search, hidden filter, refresh/add actions, and one row per project with Codex and Claude selects. Show source, status, inaccessible directories, and activation timing.
 
-- [ ] **Step 3: Add navigation and config reload**
+- [ ] **Step 3: Add the Settings entry and child window route**
 
-Add the top-level “项目模型” tab and reload project rows on `config-changed` and `project-models-changed`.
+Add the feature toggle and “管理项目” button to Settings. Open a dedicated `project-models` child
+window; do not add a top-level tab. Reload project rows on `config-changed` and
+`project-models-changed`.
 
 - [ ] **Step 4: Build the frontend**
 

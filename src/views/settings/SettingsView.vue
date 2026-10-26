@@ -6,12 +6,14 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
 import { useProxyStore } from '@/stores/useProxyStore'
 import { useClientDirsStore } from '@/stores/useClientDirsStore'
+import { useProjectModelsStore } from '@/stores/useProjectModelsStore'
 import { BaseButton, BaseInput, ConfirmDialog, IconButton, Toggle } from '@/components/base'
 import { formatBytes } from '@/utils/format'
 
 const configStore = useConfigStore()
 const proxyStore = useProxyStore()
 const clientDirsStore = useClientDirsStore()
+const projectModelsStore = useProjectModelsStore()
 
 const portDraft = ref('')
 const notice = ref('')
@@ -54,6 +56,19 @@ async function onToggleLaunchAtLogin(value) {
 // 请求日志 / 用量记录的记录开关（缺省即开启）。关掉后主进程不再落对应数据，历史保留
 const logsEnabled = computed(() => configStore.config?.settings.logsEnabled !== false)
 const usageEnabled = computed(() => configStore.config?.settings.usageEnabled !== false)
+const projectModelsEnabled = computed(() => projectModelsStore.enabled)
+
+async function onToggleProjectModels(value) {
+  notice.value = ''
+  await projectModelsStore.setEnabled(value)
+  if (projectModelsStore.notice) notice.value = projectModelsStore.notice
+}
+
+async function onOpenProjectModels() {
+  notice.value = ''
+  const result = await window.electronAPI.openProjectModelsWindow()
+  if (!result.success) notice.value = result.error || '打开项目模型窗口失败'
+}
 
 async function onToggleStorage(settingKey, value) {
   notice.value = ''
@@ -306,6 +321,28 @@ onMounted(() => {
       </div>
 
       <p v-if="dirNotice" class="dirs-notice">{{ dirNotice }}</p>
+    </div>
+
+    <div class="page-card">
+      <div class="setting-row">
+        <div class="setting-info">
+          <span class="setting-name">项目默认模型</span>
+          <span class="setting-desc">
+            读取 Codex / Claude 全局会话里的工作目录，为每个项目固定默认模型；关闭后保留已有绑定和项目配置
+          </span>
+        </div>
+        <div class="setting-control">
+          <Toggle
+            :model-value="projectModelsEnabled"
+            :disabled="projectModelsStore.busy"
+            @change="onToggleProjectModels"
+          />
+          <BaseButton variant="secondary" size="sm" @click="onOpenProjectModels">
+            管理项目
+          </BaseButton>
+        </div>
+      </div>
+      <p v-if="projectModelsStore.notice" class="dirs-notice">{{ projectModelsStore.notice }}</p>
     </div>
 
     <div class="page-card">

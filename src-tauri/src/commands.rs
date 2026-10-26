@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::clients::{
     apply_client_config, daemon, detect_dir_kind, inspect_client_config, scan_client_dirs,
@@ -266,6 +266,27 @@ pub async fn get_project_models(state: State<'_, Arc<AppState>>) -> Result<Value
         "success": true,
         "view": serde_json::to_value(view).unwrap_or(Value::Null)
     }))
+}
+
+#[tauri::command]
+pub async fn open_project_models_window(app: tauri::AppHandle) -> Result<Value, String> {
+    if let Some(window) = app.get_webview_window("project-models") {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(json!({ "success": true }));
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "project-models",
+        tauri::WebviewUrl::App("index.html?window=project-models".into()),
+    )
+    .title("项目模型")
+    .inner_size(1040.0, 720.0)
+    .min_inner_size(840.0, 560.0)
+    .resizable(true)
+    .build()
+    .map_err(|error| error.to_string())?;
+    Ok(json!({ "success": true }))
 }
 
 #[tauri::command]

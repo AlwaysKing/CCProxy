@@ -189,6 +189,7 @@ pub fn run() {
             commands::apply_client_dir,
             commands::remove_client_dir,
             commands::get_project_models,
+            commands::open_project_models_window,
             commands::refresh_project_models,
             commands::set_project_sync_enabled,
             commands::pick_project_dir,

@@ -24,7 +24,7 @@ CCProxy 增加可开关的“项目模型”功能：按项目工作目录统一
 | 自动发现展示 | 未绑定项目直接进入列表，模型栏留空，不写任何文件 |
 | 映射失效 | 不覆盖磁盘上的旧 `model`，绑定标为失效并停止该字段同步 |
 | 共享 Claude 配置 | 多个项目解析到同一个 `settings.local.json` 时，只允许一个 Claude 绑定，避免后写覆盖前写 |
-| 界面入口 | 顶部新增“项目模型”页 |
+| 界面入口 | 设置页提供总开关和“管理项目”按钮；项目列表在独立子窗口 |
 | 配置位置 | 继续使用 `~/.ccproxy/app.json` |
 
 ## 非目标
@@ -38,7 +38,12 @@ CCProxy 增加可开关的“项目模型”功能：按项目工作目录统一
 
 ## 用户界面
 
-顶部导航增加“项目模型”页。页面标题区包含：
+主窗口不新增顶部导航。设置页增加“项目默认模型”设置行：
+
+- 功能总开关。
+- “管理项目”按钮，打开或聚焦独立子窗口。
+
+清单子窗口标题区包含：
 
 - 功能总开关。
 - 自动发现来源摘要。
@@ -215,6 +220,7 @@ Codex 只加载受信任项目里的 `.codex/config.toml`，页面需要持续�
 | 命令 | 作用 |
 |---|---|
 | `get_project_models` | 返回合并后的项目、模型候选与同步状态 |
+| `open_project_models_window` | 打开或聚焦项目清单子窗口 |
 | `refresh_project_models` | 刷新 Codex/Claude 项目索引并返回合并结果 |
 | `set_project_model` | 保存一个项目某一客户端的模型并立即同步 |
 | `add_project_dir` | 手动加入项目目录 |
@@ -239,10 +245,10 @@ Codex 只加载受信任项目里的 `.codex/config.toml`，页面需要持续�
 | `src-tauri/src/clients/toml.rs` / `apply.rs` | 复用顶层 `model` 改写能力 |
 | `src-tauri/src/state.rs` | 开启与映射变化时的同步副作用 |
 | `src-tauri/src/commands.rs` / `lib.rs` | 新命令注册 |
-| `src/views/projects/ProjectsView.vue` | 新页面 |
+| `src/views/projects/ProjectsView.vue` | 独立清单子窗口 |
 | `src/stores/useProjectModelsStore.js` | 页面状态与 action |
 | `src/api/tauriBridge.js` | 新 IPC 方法 |
-| `src/App.vue` | 顶部导航入口 |
+| `src/App.vue` | 识别子窗口路由并渲染独立清单视图，不增加顶部导航 |
 
 ## 测试
 

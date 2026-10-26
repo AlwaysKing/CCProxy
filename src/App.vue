@@ -17,7 +17,6 @@ import ProjectsView from '@/views/projects/ProjectsView.vue'
 // 页面入口。模型映射页内部再切换客户端协议。
 const VIEW_ITEMS = [
   { key: 'providers', label: '模型映射' },
-  { key: 'projects', label: '项目模型' },
   { key: 'logs', label: '请求日志' },
   { key: 'usage', label: '用量统计' },
   { key: 'settings', label: '设置' }
@@ -27,6 +26,7 @@ const configStore = useConfigStore()
 const proxyStore = useProxyStore()
 const clientDirsStore = useClientDirsStore()
 const projectModelsStore = useProjectModelsStore()
+const isProjectModelsWindow = new URLSearchParams(window.location.search).get('window') === 'project-models'
 
 const activeView = ref('providers')
 const activeProtocolId = ref(null)
@@ -49,9 +49,13 @@ async function onToggleProxy() {
 let unsubscribes = []
 
 onMounted(async () => {
+  unsubscribes.push(window.electronEvents.onProjectModelsChanged(() => projectModelsStore.reload()))
+  if (isProjectModelsWindow) {
+    await projectModelsStore.reload()
+    return
+  }
   unsubscribes.push(window.electronEvents.onConfigChanged((payload) => configStore.applyState(payload)))
   unsubscribes.push(window.electronEvents.onProxyStatusChanged((payload) => proxyStore.apply(payload)))
-  unsubscribes.push(window.electronEvents.onProjectModelsChanged(() => projectModelsStore.reload()))
   await Promise.all([configStore.init(), proxyStore.init()])
   // 启动就扫一遍客户端目录：有和 CCProxy 不一致的，顶栏常驻一个感叹号提醒，
   // 点它去设置页处理。配置/代理先就位，检查的口径（端口、token）才是最终的
@@ -76,7 +80,11 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div v-if="isProjectModelsWindow" class="app-subwindow">
+    <ProjectsView />
+  </div>
+
+  <div v-else class="app-shell">
     <header class="app-topbar" data-tauri-drag-region="deep">
       <span class="app-title">CCProxy</span>
 
@@ -124,7 +132,6 @@ onUnmounted(() => {
 
     <main class="app-main">
       <ProvidersView v-if="activeView === 'providers'" v-model:protocol-id="activeProtocolId" />
-      <ProjectsView v-else-if="activeView === 'projects'" />
       <LogsView v-else-if="activeView === 'logs'" />
       <UsageView v-else-if="activeView === 'usage'" />
       <SettingsView v-else-if="activeView === 'settings'" />
@@ -138,6 +145,12 @@ onUnmounted(() => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
+}
+
+.app-subwindow {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* 全宽顶部工具条：整条可拖拽，红绿灯嵌在左侧（trafficLightPosition 18 正好落在 48px 高度的中线）。
