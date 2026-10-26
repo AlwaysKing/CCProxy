@@ -229,7 +229,7 @@ async fn stale_cached_directory_cannot_create_a_new_binding() {
     std::fs::remove_dir_all(&project.path).unwrap();
     let error = state.set_project_model(&path, "codex", Some("m1"))
         .await.unwrap_err();
-    assert!(error.contains("目录不存在"));
+    assert!(error.contains("项目目录不存在"));
 }
 ```
 
@@ -327,11 +327,25 @@ pub async fn set_project_model(
         .filter(|project| Path::new(&project.path).is_dir())
         .map(|project| project.path.clone());
     if existing.is_none() && discovered_path.is_none() {
-        return Err("项目目录不在自动发现列表中".to_string());
+        return Err("项目目录不存在或不在自动发现列表中".to_string());
     }
-    if client == "claude" { /* reject another binding with same claude_root */ }
     let target = existing.map(|index| draft.settings.project_model_bindings[index].path.clone())
         .or(discovered_path).ok_or_else(|| "项目目录不可用".to_string())?;
+    if client == "claude" {
+        let target_root = claude_root(&target);
+        if let Some(owner) = draft.settings.project_model_bindings.iter()
+            .enumerate()
+            .find(|(index, binding)| Some(*index) != existing
+                && binding.client == "claude"
+                && claude_root(&binding.path) == target_root)
+            .map(|(_, binding)| binding)
+        {
+            return Err(format!(
+                "项目 {target} 与 {} 使用同一个 Claude settings.local.json",
+                owner.path
+            ));
+        }
+    }
     if let Some(index) = existing {
         draft.settings.project_model_bindings[index].mapping_id = mapping.mapping_id.clone();
     } else {
@@ -357,33 +371,60 @@ for an empty binding list and prunes stale status entries.
 
 - [ ] **Step 7: Validate the actual bound mapping during sync**
 
-Add a helper that returns the model only when the binding's own `mappingId` is in that client's
-final candidate list. Use it in `sync_all_project_models_locked` instead of looking up any exact
-mapping by model name:
+Add a helper that checks the binding's own mapping rather than searching by model name. A mapping
+that is enabled, exact and routable remains sync-valid even if a lower-priority exact mapping is
+shadowed by an earlier wildcard; shadowing only removes it from selectable candidates.
 
 ```rust
-fn candidate_model_for_binding(
+fn sync_model_for_binding(
     config: &AppConfig,
     client: &str,
     mapping_id: &str,
 ) -> Option<String> {
-    let candidates = project_model_candidates(config);
-    let list = if client == "codex" { &candidates.codex } else { &candidates.claude };
-    list.iter().find(|candidate| candidate.mapping_id == mapping_id)
-        .map(|candidate| candidate.model.clone())
+    let protocol_id = if client == "codex" { "openai_responses" } else { "anthropic" };
+    let protocol = config.protocol(protocol_id).filter(|protocol| protocol.enabled)?;
+    let mapping = protocol.mappings.iter()
+        .find(|mapping| mapping.id == mapping_id)?;
+    if !mapping.enabled || mapping.client_model.is_empty()
+        || mapping.client_model.contains('*')
+    {
+        return None;
+    }
+    let provider = config.providers.iter()
+        .find(|provider| provider.id == mapping.provider_id && provider.enabled)?;
+    provider.model_groups.iter()
+        .any(|group| group.id == mapping.model_group_id)
+        .then(|| mapping.client_model.clone())
 }
 ```
 
-Add a regression where the bound mapping is disabled while a later duplicate exact mapping remains
-enabled; the bound row must report `binding_invalid`.
+Use this helper in `sync_all_project_models_locked`. Add two regressions:
 
-- [ ] **Step 8: Run state tests**
+- A bound exact mapping shadowed by an earlier wildcard still reports `ok`.
+- A disabled bound mapping reports `binding_invalid` even if a later duplicate exact mapping with
+  the same model remains enabled.
+
+- [ ] **Step 8: Migrate the existing state tests**
+
+Replace old `add_project_bindings` and `remove_project_binding` test setup with `set_project_model`.
+Remove mappings-specific window tests that no longer apply. Preserve and port tests for:
+
+- Batch-created equivalent bindings and project-file writes.
+- Codex and Claude bindings on the same path.
+- Mapping changes rewriting the existing project model.
+- Removing one client binding while the other remains.
+- Offline bound projects can be cleared.
+- Unknown mapping and stale path never change config.
+- Two Claude projects cannot share one `settings.local.json`, for both create and update paths.
+- Shadowed exact mappings remain sync-valid but are not selectable candidates.
+
+- [ ] **Step 9: Run state tests**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --test project_model_state`
 
 Expected: all tests pass.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add src-tauri/src/state.rs src-tauri/src/state/project_models.rs src-tauri/tests/project_model_state.rs
@@ -502,15 +543,25 @@ function optionsFor(project, client) {
 }
 ```
 
-`onChange` calls `store.setModel(project, client, mappingId)`. Keep the select enabled for offline
-existing bindings. Show `sources` as Codex/Claude badges, an unavailable-directory warning, and
-status beneath each select. No add/edit/delete controls. Use the project path as the row key.
+Bind the displayed value with `:model-value="project[`${client}MappingId`] || ''"`. Handle
+`@update:model-value="onModelChange(project, client, $event)"`; `AppSelect` emits the selected
+option's primitive value there, while its `change` event emits the whole option object. Keep the
+select enabled for offline existing bindings. Show `sources` as Codex/Claude badges, an
+unavailable-directory warning, and status beneath each select. No add/edit/delete controls. Use the
+project path as the row key.
+
+`store.setModel` sends `mappingId || null` to the bridge so an empty select value becomes Rust
+`None`, while the row's select model stays `''` and displays “不设置（停止托管）”.
 
 - [ ] **Step 5: Wire page lifecycle**
 
 On mount, call `store.reload()` and subscribe to `onProjectModelsChanged` with another
 `store.reload()`; unsubscribe on unmount. After a failed set command, `setModel` must call `reload()`
 before returning so the UI discards the unpersisted select value.
+
+When the unified view reads a Codex binding with `requiresProjectTrust`, re-check current trust on
+each read and change that status to `ok` when the project has since become trusted, preserving the
+existing behavior. Add a state test for this transition.
 
 - [ ] **Step 6: Add main navigation and remove subwindow routing**
 
@@ -571,6 +622,6 @@ Expected: exit 0.
 
 - [ ] **Step 4: Check the final diff**
 
-Run: `git diff --check && git status --short`
+Run: `git diff --check 10b38a8..HEAD && git status --short`
 
 Expected: no whitespace errors; only intended files and the pre-existing `.codex/` directory.
