@@ -365,9 +365,10 @@ pub async fn set_project_model(
 
 - [ ] **Step 6: Emit change when the last binding is removed**
 
-Update `apply_config_effects` so project sync runs whenever project bindings changed, even when the
-resulting list is empty. `sync_all_project_models_locked` already performs no project-file writes
-for an empty binding list and prunes stale status entries.
+Update `apply_config_effects` so project sync runs whenever project bindings, protocols or providers
+change, regardless of whether any bindings remain. `sync_all_project_models_locked` already
+performs no project-file writes for an empty binding list, prunes stale status entries and emits
+`project-models-changed`; this also refreshes candidates after mapping/provider edits.
 
 - [ ] **Step 7: Validate the actual bound mapping during sync**
 
@@ -510,13 +511,17 @@ Add these three methods to the browser fallback event object so direct Vite rend
 
 - [ ] **Step 2: Rewrite the store**
 
-State: `view`, `loading`, `busy`, `notice`, `search`; computed `candidates`, `projects`,
-`filteredProjects`. `reload(refresh = false)` calls the matching bridge method and applies the view.
-`setModel(project, client, mappingId)` calls `setProjectModel(project.path, client, mappingId || null)`,
-reloads, surfaces `status.message`, and returns success.
+State: `view`, `loading`, `notice`, `search`, and a reactive `pendingKeys` set; computed
+`candidates`, `projects`, `filteredProjects`. `reload(refresh = false)` calls the matching bridge
+method and applies the view. `setModel(project, client, mappingId)` adds
+`${project.path}\0${client}` to `pendingKeys`, calls
+`setProjectModel(project.path, client, mappingId || null)`, and always reloads before finishing.
+On failure it reloads first and restores the operation error into `notice`, because a successful
+reload clears the previous notice. Expose `isPending(path, client)` so only the active select is
+disabled.
 
-Return only `view`, `loading`, `busy`, `notice`, `search`, `candidates`, `projects`,
-`filteredProjects`, `reload`, and `setModel`.
+Return only `view`, `loading`, `notice`, `search`, `candidates`, `projects`, `filteredProjects`,
+`reload`, `setModel`, and `isPending`.
 
 - [ ] **Step 3: Rewrite the page**
 
@@ -546,9 +551,11 @@ function optionsFor(project, client) {
 Bind the displayed value with `:model-value="project[`${client}MappingId`] || ''"`. Handle
 `@update:model-value="onModelChange(project, client, $event)"`; `AppSelect` emits the selected
 option's primitive value there, while its `change` event emits the whole option object. Keep the
-select enabled for offline existing bindings. Show `sources` as Codex/Claude badges, an
-unavailable-directory warning, and status beneath each select. No add/edit/delete controls. Use the
-project path as the row key.
+select enabled for an offline existing binding of that same client; disable the other client's
+select for a missing project because the backend rejects creating a new offline binding. Disable
+only the select currently operated on via `store.isPending`. Show `sources` as Codex/Claude badges,
+an unavailable-directory warning, and status beneath each select. No add/edit/delete controls. Use
+the project path as the row key.
 
 `store.setModel` sends `mappingId || null` to the bridge so an empty select value becomes Rust
 `None`, while the row's select model stays `''` and displays “不设置（停止托管）”.
@@ -561,7 +568,34 @@ before returning so the UI discards the unpersisted select value.
 
 When the unified view reads a Codex binding with `requiresProjectTrust`, re-check current trust on
 each read and change that status to `ok` when the project has since become trusted, preserving the
-existing behavior. Add a state test for this transition.
+existing behavior. Also change an `ok` status to `requiresProjectTrust` when trust is removed.
+Extract a pure reconciliation helper so this is testable without a Tauri handle:
+
+```rust
+fn reconcile_codex_trust(
+    mut status: Option<ProjectSyncStatusSnapshot>,
+    trusted: Option<bool>,
+) -> Option<ProjectSyncStatusSnapshot> {
+    if trusted == Some(true)
+        && status.as_ref().is_some_and(|item| {
+            item.status == ProjectSyncState::RequiresProjectTrust
+        })
+    {
+        let item = status.as_mut().unwrap();
+        item.status = ProjectSyncState::Ok;
+        item.message = None;
+    } else if trusted == Some(false)
+        && status.as_ref().is_some_and(|item| item.status == ProjectSyncState::Ok)
+    {
+        let item = status.as_mut().unwrap();
+        item.status = ProjectSyncState::RequiresProjectTrust;
+        item.message = Some("Codex 只会加载受信任项目的 config.toml".to_string());
+    }
+    status
+}
+```
+
+Add unit tests inside `state/project_models.rs` for both trust directions.
 
 - [ ] **Step 6: Add main navigation and remove subwindow routing**
 
