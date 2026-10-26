@@ -1,6 +1,6 @@
 <script setup>
 // 应用壳：顶部工具条 + 内容区。
-// 顶栏只保留页面入口与代理状态；协议切换放在模型映射页的映射模块标题行。
+// 顶栏保留页面入口与代理状态；协议切换放在模型映射页的映射模块标题行。
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
 import { useProxyStore } from '@/stores/useProxyStore'
@@ -15,6 +15,7 @@ import ProjectsView from '@/views/projects/ProjectsView.vue'
 
 // 页面入口。模型映射页内部再切换客户端协议。
 const VIEW_ITEMS = [
+  { key: 'projects', label: '项目管理' },
   { key: 'providers', label: '模型映射' },
   { key: 'logs', label: '请求日志' },
   { key: 'usage', label: '用量统计' },
@@ -24,10 +25,6 @@ const VIEW_ITEMS = [
 const configStore = useConfigStore()
 const proxyStore = useProxyStore()
 const clientDirsStore = useClientDirsStore()
-const windowParams = new URLSearchParams(window.location.search)
-const isProjectModelsWindow = windowParams.get('window') === 'project-models'
-const projectProtocol = windowParams.get('protocol') || 'anthropic'
-const projectMappingId = windowParams.get('mapping') || ''
 
 const activeView = ref('providers')
 const activeProtocolId = ref(null)
@@ -50,9 +47,6 @@ async function onToggleProxy() {
 let unsubscribes = []
 
 onMounted(async () => {
-  if (isProjectModelsWindow) {
-    return
-  }
   unsubscribes.push(window.electronEvents.onConfigChanged((payload) => configStore.applyState(payload)))
   unsubscribes.push(window.electronEvents.onProxyStatusChanged((payload) => proxyStore.apply(payload)))
   await Promise.all([configStore.init(), proxyStore.init()])
@@ -78,11 +72,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-if="isProjectModelsWindow" class="app-subwindow">
-    <ProjectsView :protocol-id="projectProtocol" :mapping-id="projectMappingId" />
-  </div>
-
-  <div v-else class="app-shell">
+  <div class="app-shell">
     <header class="app-topbar" data-tauri-drag-region="deep">
       <span class="app-title">CCProxy</span>
 
@@ -129,7 +119,8 @@ onUnmounted(() => {
     </header>
 
     <main class="app-main">
-      <ProvidersView v-if="activeView === 'providers'" v-model:protocol-id="activeProtocolId" />
+      <ProjectsView v-if="activeView === 'projects'" />
+      <ProvidersView v-else-if="activeView === 'providers'" v-model:protocol-id="activeProtocolId" />
       <LogsView v-else-if="activeView === 'logs'" />
       <UsageView v-else-if="activeView === 'usage'" />
       <SettingsView v-else-if="activeView === 'settings'" />
@@ -143,12 +134,6 @@ onUnmounted(() => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-}
-
-.app-subwindow {
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
 }
 
 /* 全宽顶部工具条：整条可拖拽，红绿灯嵌在左侧（trafficLightPosition 18 正好落在 48px 高度的中线）。

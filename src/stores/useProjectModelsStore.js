@@ -1,83 +1,99 @@
-// 按协议隔离的项目模型子窗口状态。
-import { ref } from 'vue'
+// 统一项目管理页的唯一前端状态：项目发现、候选模型和同步状态都以主进程返回为准。
+import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { logger } from '@/utils/logger'
 
 const EMPTY_VIEW = {
-  protocol: '',
-  client: '',
-  mappingId: '',
-  model: '',
-  title: '项目默认模型',
+  candidates: { codex: [], claude: [] },
   projects: [],
-  directoryCandidates: [],
   codexDaemon: null
 }
 
 export const useProjectModelsStore = defineStore('projectModels', () => {
   const view = ref(EMPTY_VIEW)
   const loading = ref(false)
-  const busy = ref(false)
   const notice = ref('')
+  const search = ref('')
+  const pendingKeys = ref(new Set())
+
+  const candidates = computed(() => view.value.candidates ?? EMPTY_VIEW.candidates)
+  const projects = computed(() => view.value.projects ?? [])
+  const filteredProjects = computed(() => {
+    const needle = search.value.trim().toLowerCase()
+    return projects.value.filter(
+      (project) => !needle || project.path.toLowerCase().includes(needle)
+    )
+  })
 
   function applyView(next) {
     view.value = next ? { ...EMPTY_VIEW, ...next } : EMPTY_VIEW
   }
 
-  async function reload(protocol, mappingId, refresh = false) {
+  function isPending(path, client) {
+    return pendingKeys.value.has(`${path}\0${client}`)
+  }
+
+  function setPending(path, client, pending) {
+    const next = new Set(pendingKeys.value)
+    const key = `${path}\0${client}`
+    if (pending) next.add(key)
+    else next.delete(key)
+    pendingKeys.value = next
+  }
+
+  async function reload(refresh = false) {
     loading.value = true
     try {
       const result = refresh
-        ? await window.electronAPI.refreshProjectModels(protocol, mappingId)
-        : await window.electronAPI.getProjectModels(protocol, mappingId)
-      if (!result.success) throw new Error(result.error || '读取项目模型失败')
+        ? await window.electronAPI.refreshProjectModels()
+        : await window.electronAPI.getProjectModels()
+      if (!result.success) throw new Error(result.error || '读取项目失败')
       applyView(result.view)
       notice.value = ''
+      return true
     } catch (error) {
-      notice.value = error.message || '读取项目模型失败'
-      logger.error('读取项目模型失败', { protocol, error: error.message })
+      notice.value = error.message || '读取项目失败'
+      logger.error('读取项目失败', { error: error.message })
+      return false
     } finally {
       loading.value = false
     }
   }
 
-  async function add(protocol, mappingId, paths) {
-    busy.value = true
+  async function setModel(project, client, mappingId) {
+    if (isPending(project.path, client)) return false
+    setPending(project.path, client, true)
+    notice.value = ''
     try {
-      const result = await window.electronAPI.addProjectBindings(protocol, mappingId, paths)
-      if (!result.success) throw new Error(result.error || '添加项目失败')
-      await reload(protocol, mappingId)
+      const result = await window.electronAPI.setProjectModel(
+        project.path,
+        client,
+        mappingId || null
+      )
+      if (!result.success) throw new Error(result.error || '保存项目模型失败')
+      await reload()
+      if (result.status?.message) notice.value = result.status.message
       return true
     } catch (error) {
-      notice.value = error.message || '添加项目失败'
+      const message = error.message || '保存项目模型失败'
+      await reload()
+      notice.value = message
       return false
     } finally {
-      busy.value = false
-    }
-  }
-
-  async function remove(protocol, mappingId, id) {
-    busy.value = true
-    try {
-      const result = await window.electronAPI.removeProjectBinding(protocol, id)
-      if (!result.success) throw new Error(result.error || '移除项目失败')
-      await reload(protocol, mappingId)
-      return true
-    } catch (error) {
-      notice.value = error.message || '移除项目失败'
-      return false
-    } finally {
-      busy.value = false
+      setPending(project.path, client, false)
     }
   }
 
   return {
     view,
     loading,
-    busy,
     notice,
+    search,
+    candidates,
+    projects,
+    filteredProjects,
     reload,
-    add,
-    remove
+    setModel,
+    isPending
   }
 })

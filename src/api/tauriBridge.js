@@ -35,6 +35,7 @@ export function installTauriBridge() {
     )
     window.electronEvents = {
       onConfigChanged: () => () => {},
+      onProjectModelsChanged: () => () => {},
       onProxyStatusChanged: () => () => {},
       onLogAppended: () => () => {}
     }
@@ -57,16 +58,10 @@ export function installTauriBridge() {
     addClientDir: (dirPath) => invoke('add_client_dir', { path: dirPath }),
     applyClientDir: (dirPath) => invoke('apply_client_dir', { path: dirPath }),
     removeClientDir: (dirId) => invoke('remove_client_dir', { id: dirId }),
-    getProjectModels: (protocol, mappingId) =>
-      invoke('get_project_models', { protocol, mappingId }),
-    openProjectModelsWindow: (protocol, mappingId) =>
-      invoke('open_project_models_window', { protocol, mappingId }),
-    refreshProjectModels: (protocol, mappingId) =>
-      invoke('refresh_project_models', { protocol, mappingId }),
-    addProjectBindings: (protocol, mappingId, paths) =>
-      invoke('add_project_bindings', { protocol, mappingId, paths }),
-    removeProjectBinding: (protocol, id) =>
-      invoke('remove_project_binding', { protocol, id }),
+    getProjectModels: () => invoke('get_project_models'),
+    refreshProjectModels: () => invoke('refresh_project_models'),
+    setProjectModel: (path, client, mappingId) =>
+      invoke('set_project_model', { path, client, mappingId }),
     getLogs: () => invoke('get_logs'),
     getUsage: (range) => invoke('get_usage', { range }),
     getStorageStats: () => invoke('get_storage_stats'),

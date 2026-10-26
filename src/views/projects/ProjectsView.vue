@@ -1,25 +1,10 @@
 <script setup>
-// 协议隔离的项目默认模型子窗口：Anthropic 管 Claude，OpenAI Responses 管 Codex。
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+// 统一项目管理：一个工作目录一行，直接维护 Claude 与 Codex 的项目默认模型。
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useProjectModelsStore } from '@/stores/useProjectModelsStore'
-import { Badge, BaseButton, BaseDialog, BaseInput, EmptyState, FormField } from '@/components/base'
-
-const props = defineProps({
-  protocolId: {
-    type: String,
-    required: true
-  },
-  mappingId: {
-    type: String,
-    required: true
-  }
-})
+import { AppSelect, Badge, BaseButton, BaseInput, EmptyState } from '@/components/base'
 
 const store = useProjectModelsStore()
-const addVisible = ref(false)
-const selectedPaths = ref([])
-const search = ref('')
-const candidateSearch = ref('')
 let unsubscribe = null
 
 const STATUS_META = {
@@ -32,48 +17,66 @@ const STATUS_META = {
   requires_project_trust: { label: '需信任项目', variant: 'warning' }
 }
 
-const filteredProjects = computed(() => {
-  const needle = search.value.trim().toLowerCase()
-  return store.view.projects.filter((project) => !needle || project.path.toLowerCase().includes(needle))
+const sourceLabels = computed(() => (project) => {
+  const labels = []
+  if (project.sources?.claude) labels.push('Claude')
+  if (project.sources?.codex) labels.push('Codex')
+  return labels
 })
 
-const boundPaths = computed(() => new Set(store.view.projects.map((project) => project.path)))
-
-const availableCandidates = computed(() => {
-  const needle = candidateSearch.value.trim().toLowerCase()
-  return store.view.directoryCandidates.filter(
-    (path) => !boundPaths.value.has(path) && (!needle || path.toLowerCase().includes(needle))
-  )
-})
-
-function statusMeta(project) {
-  if (!project.status) return { label: '等待同步', variant: 'default' }
-  return STATUS_META[project.status.status] || { label: project.status.status, variant: 'default' }
+function mappingIdFor(project, client) {
+  return project[`${client}MappingId`] || ''
 }
 
-function toggleCandidate(path) {
-  selectedPaths.value = selectedPaths.value.includes(path)
-    ? selectedPaths.value.filter((item) => item !== path)
-    : [...selectedPaths.value, path]
+function modelFor(project, client) {
+  return project[`${client}Model`] || ''
 }
 
-function openAdd() {
-  selectedPaths.value = []
-  candidateSearch.value = ''
-  addVisible.value = true
+function statusFor(project, client) {
+  return project[`${client}Status`]
 }
 
-async function confirmAdd() {
-  if (!selectedPaths.value.length) return
-  const ok = await store.add(props.protocolId, props.mappingId, selectedPaths.value)
-  if (ok) addVisible.value = false
+function statusMeta(project, client) {
+  const status = statusFor(project, client)
+  if (!status) return null
+  return STATUS_META[status.status] || { label: status.status, variant: 'default' }
+}
+
+function optionsFor(project, client) {
+  const candidates = store.candidates[client] || []
+  const options = [
+    { value: '', label: '不设置（停止托管）' },
+    ...candidates.map((candidate) => ({
+      value: candidate.mappingId,
+      label: candidate.model
+    }))
+  ]
+  const mappingId = mappingIdFor(project, client)
+  if (mappingId && !candidates.some((candidate) => candidate.mappingId === mappingId)) {
+    options.push({
+      value: mappingId,
+      label: `${modelFor(project, client) || mappingId}（当前值，不可重新选择）`,
+      disabled: true
+    })
+  }
+  return options
+}
+
+function canEdit(project, client) {
+  return !project.missing || !!mappingIdFor(project, client)
+}
+
+function selectDisabled(project, client) {
+  return !canEdit(project, client) || store.isPending(project.path, client)
+}
+
+function onModelChange(project, client, mappingId) {
+  return store.setModel(project, client, mappingId)
 }
 
 onMounted(() => {
-  store.reload(props.protocolId, props.mappingId)
-  unsubscribe = window.electronEvents.onProjectModelsChanged(() =>
-    store.reload(props.protocolId, props.mappingId)
-  )
+  store.reload()
+  unsubscribe = window.electronEvents.onProjectModelsChanged(() => store.reload())
 })
 
 onUnmounted(() => {
@@ -85,67 +88,96 @@ onUnmounted(() => {
   <div class="projects-page">
     <header class="page-bar">
       <div>
-        <h1>{{ store.view.title }}</h1>
+        <h1>项目管理</h1>
         <p class="page-subtitle">
-          从全局会话目录选择项目，固定未来会话使用的默认模型。移除绑定不会删除项目配置。
+          直接设置每个项目的 Claude 与 Codex 默认模型；目录按完整路径排序。
         </p>
       </div>
-      <div class="bar-actions">
-        <BaseButton
-          variant="secondary"
-          size="sm"
-          :loading="store.loading"
-          @click="store.reload(protocolId, mappingId, true)"
-        >
-          刷新候选
-        </BaseButton>
-        <BaseButton size="sm" :disabled="!availableCandidates.length" @click="openAdd">
-          + 添加项目
-        </BaseButton>
-      </div>
+      <BaseButton
+        variant="secondary"
+        size="sm"
+        :loading="store.loading"
+        @click="store.reload(true)"
+      >
+        刷新项目
+      </BaseButton>
     </header>
 
     <p v-if="store.notice" class="page-notice">{{ store.notice }}</p>
 
     <div class="page-card">
       <div class="table-toolbar">
-        <BaseInput v-model="search" size="sm" placeholder="搜索项目路径" />
-        <span>{{ filteredProjects.length }} 个项目</span>
+        <BaseInput v-model="store.search" size="sm" placeholder="搜索项目路径" />
+        <span>{{ store.filteredProjects.length }} 个项目</span>
       </div>
 
-      <table v-if="filteredProjects.length" class="data-table">
+      <table v-if="store.filteredProjects.length" class="data-table">
         <thead>
           <tr>
             <th>项目</th>
-            <th>默认模型</th>
-            <th>状态</th>
-            <th class="col-actions"></th>
+            <th>Claude 默认模型</th>
+            <th>Codex 默认模型</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="project in filteredProjects" :key="project.id">
+          <tr
+            v-for="project in store.filteredProjects"
+            :key="project.id"
+            :class="{ 'row-missing': project.missing }"
+          >
             <td class="project-cell">
               <code :title="project.path">{{ project.path }}</code>
-              <span v-if="project.missing" class="project-warning">目录暂不可用</span>
+              <div class="project-meta">
+                <Badge
+                  v-for="label in sourceLabels(project)"
+                  :key="label"
+                  variant="default"
+                  size="sm"
+                >
+                  {{ label }}
+                </Badge>
+                <span v-if="project.missing" class="project-warning">目录暂不可用</span>
+              </div>
             </td>
-            <td><code>{{ store.view.model }}</code></td>
             <td>
-              <Badge :variant="statusMeta(project).variant" size="sm">
-                {{ statusMeta(project).label }}
-              </Badge>
-              <span
-                v-if="project.status?.message"
-                class="status-message"
-                :title="project.status.message"
-              >{{ project.status.message }}</span>
+              <div class="model-cell">
+                <AppSelect
+                  :model-value="mappingIdFor(project, 'claude')"
+                  :options="optionsFor(project, 'claude')"
+                  :disabled="selectDisabled(project, 'claude')"
+                  full-width
+                  @update:model-value="onModelChange(project, 'claude', $event)"
+                />
+                <div
+                  v-if="statusMeta(project, 'claude')"
+                  class="model-status"
+                  :title="statusFor(project, 'claude')?.message || ''"
+                >
+                  <Badge :variant="statusMeta(project, 'claude').variant" size="sm">
+                    {{ statusMeta(project, 'claude').label }}
+                  </Badge>
+                </div>
+              </div>
             </td>
-            <td class="col-actions">
-              <BaseButton
-                variant="ghost"
-                size="sm"
-                :disabled="store.busy"
-                @click="store.remove(protocolId, mappingId, project.id)"
-              >移除</BaseButton>
+            <td>
+              <div class="model-cell">
+                <AppSelect
+                  :model-value="mappingIdFor(project, 'codex')"
+                  :options="optionsFor(project, 'codex')"
+                  :disabled="selectDisabled(project, 'codex')"
+                  full-width
+                  @update:model-value="onModelChange(project, 'codex', $event)"
+                />
+                <div
+                  v-if="statusMeta(project, 'codex')"
+                  class="model-status"
+                  :title="statusFor(project, 'codex')?.message || ''"
+                >
+                  <Badge :variant="statusMeta(project, 'codex').variant" size="sm">
+                    {{ statusMeta(project, 'codex').label }}
+                  </Badge>
+                </div>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -153,19 +185,26 @@ onUnmounted(() => {
 
       <EmptyState
         v-else
-        title="还没有项目绑定"
-        description="从全局会话目录中批量选择项目，为它们设置同一个默认模型"
+        title="还没有发现项目"
+        description="从 Codex 或 Claude 使用过的目录会自动出现在这里"
       />
     </div>
 
     <div class="page-card notes-card">
       <div>
+        <strong>停止托管</strong>
+        <span>
+          “不设置”只删除 CCProxy 的管理关系，不会删除或回滚项目里已经写入的
+          <code>model</code>。
+        </span>
+      </div>
+      <div>
         <strong>生效方式</strong>
         <span>项目配置写入后，已运行的客户端通常要到新会话才读取新的默认模型。</span>
       </div>
-      <div v-if="store.view.client === 'codex'">
+      <div>
         <strong>Codex 项目信任</strong>
-        <span>只有受信任项目的 <code>.codex/config.toml</code> 才会被加载。</span>
+        <span>Codex 只会加载受信任项目的 <code>.codex/config.toml</code>。</span>
       </div>
       <div v-if="store.view.codexDaemon?.running" class="daemon-note">
         <strong>Codex app-server 正在运行</strong>
@@ -176,51 +215,13 @@ onUnmounted(() => {
         </span>
       </div>
     </div>
-
-    <BaseDialog
-      v-model="addVisible"
-      title="添加项目"
-      width="680px"
-    >
-      <FormField
-        label="会话目录候选"
-        :hint="`默认模型 ${store.view.model} · 已选 ${selectedPaths.length} 个目录`"
-      >
-        <BaseInput v-model="candidateSearch" size="sm" placeholder="搜索候选目录" />
-        <div v-if="availableCandidates.length" class="candidate-list">
-          <label
-            v-for="path in availableCandidates"
-            :key="path"
-            class="candidate-row"
-            :class="{ selected: selectedPaths.includes(path) }"
-          >
-            <input
-              type="checkbox"
-              :checked="selectedPaths.includes(path)"
-              @change="toggleCandidate(path)"
-            />
-            <code>{{ path }}</code>
-          </label>
-        </div>
-        <p v-else class="candidate-empty">当前协议没有新的会话目录候选</p>
-      </FormField>
-
-      <template #footer>
-        <BaseButton variant="secondary" size="sm" @click="addVisible = false">取消</BaseButton>
-        <BaseButton
-          size="sm"
-          :loading="store.busy"
-          :disabled="!selectedPaths.length"
-          @click="confirmAdd"
-        >添加 {{ selectedPaths.length ? `(${selectedPaths.length})` : '' }}</BaseButton>
-      </template>
-    </BaseDialog>
   </div>
 </template>
 
 <style scoped>
 .projects-page {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   padding: var(--spacing-xl);
   display: flex;
   flex-direction: column;
@@ -250,12 +251,6 @@ onUnmounted(() => {
   margin-top: var(--spacing-xs);
 }
 
-.bar-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-sm);
-}
-
 .table-toolbar {
   display: flex;
   align-items: center;
@@ -267,42 +262,52 @@ onUnmounted(() => {
 }
 
 .table-toolbar :deep(.base-input-wrapper) {
-  width: min(340px, 45vw);
+  width: min(360px, 45vw);
 }
 
 .project-cell {
-  max-width: 390px;
+  width: 46%;
+  max-width: 0;
 }
 
-.project-cell code {
+.project-cell > code {
   display: block;
   overflow: hidden;
+  color: var(--text-primary);
   font-family: var(--font-family-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.project-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  min-height: 18px;
+  margin-top: 4px;
+}
+
 .project-warning {
-  display: block;
-  margin-top: 3px;
   color: var(--color-warning);
   font-size: var(--font-size-xs);
 }
 
-.status-message {
-  display: block;
-  max-width: 240px;
-  overflow: hidden;
-  margin-top: 3px;
-  color: var(--text-muted);
-  font-size: var(--font-size-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.model-cell {
+  min-width: 210px;
 }
 
-.col-actions {
-  width: 70px;
-  text-align: right;
+.model-cell :deep(.app-select) {
+  min-width: 190px;
+}
+
+.model-status {
+  display: flex;
+  margin-top: 5px;
+}
+
+.row-missing .project-cell > code {
+  color: var(--text-muted);
 }
 
 .notes-card {
@@ -320,44 +325,5 @@ onUnmounted(() => {
 .daemon-note {
   padding-top: var(--spacing-md);
   border-top: 1px solid var(--border-default);
-}
-
-.candidate-list {
-  max-height: 280px;
-  overflow-y: auto;
-  margin-top: var(--spacing-sm);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-}
-
-.candidate-row {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-sm);
-  padding: var(--spacing-sm) var(--spacing-md);
-  cursor: pointer;
-}
-
-.candidate-row + .candidate-row {
-  border-top: 1px solid var(--border-default);
-}
-
-.candidate-row:hover,
-.candidate-row.selected {
-  background-color: var(--bg-hover);
-}
-
-.candidate-row code {
-  overflow: hidden;
-  font-family: var(--font-family-mono);
-  font-size: var(--font-size-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.candidate-empty {
-  margin-top: var(--spacing-sm);
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
 }
 </style>
