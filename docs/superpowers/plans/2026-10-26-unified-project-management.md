@@ -69,7 +69,7 @@ fn model_candidates_follow_first_match_routing() {
         "protocols": [{
             "id": "anthropic", "name": "Anthropic", "enabled": true,
             "mappings": [
-                { "id": "wild", "enabled": true, "clientModel": "claude-*",
+                { "id": "wild", "enabled": true, "clientModel": "claude-3*",
                   "providerId": "p1", "modelGroupId": "g1",
                   "upstreamProtocol": "anthropic", "realModel": "real" },
                 { "id": "shadowed", "enabled": true, "clientModel": "claude-3",
@@ -217,6 +217,22 @@ async fn set_model_preserves_binding_id_and_clear_keeps_client_file() {
 }
 ```
 
+```rust
+#[tokio::test]
+async fn stale_cached_directory_cannot_create_a_new_binding() {
+    let project = TempDir::new("ccproxy-unified-stale");
+    let state = test_state(routing_config(Vec::new()),
+        &TempDir::new("ccproxy-unified-stale-config"));
+    let path = std::fs::canonicalize(&project.path).unwrap()
+        .to_string_lossy().to_string();
+    state.cache_project_candidates(vec![candidate(&path, true, false)]);
+    std::fs::remove_dir_all(&project.path).unwrap();
+    let error = state.set_project_model(&path, "codex", Some("m1"))
+        .await.unwrap_err();
+    assert!(error.contains("目录不存在"));
+}
+```
+
 - [ ] **Step 2: Run tests and verify RED**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --test project_model_state unified -- --nocapture`
@@ -288,15 +304,15 @@ pub async fn set_project_model(
         return Err("未知的客户端类型".to_string());
     }
     let discovered = self.ensure_project_candidates(false).await;
-    let candidates = project_model_candidates(&self.config_snapshot());
+    let _guard = self.config_transaction.lock()
+        .map_err(|_| "配置事务锁不可用".to_string())?;
+    let mut draft = self.config_snapshot();
+    let candidates = project_model_candidates(&draft);
     let allowed_mapping = mapping_id.map(|mapping_id| {
         let list = if client == "codex" { &candidates.codex } else { &candidates.claude };
         list.iter().find(|item| item.mapping_id == mapping_id)
             .ok_or_else(|| "该映射当前不可作为项目默认模型".to_string())
     }).transpose()?;
-    let _guard = self.config_transaction.lock()
-        .map_err(|_| "配置事务锁不可用".to_string())?;
-    let mut draft = self.config_snapshot();
     let existing = draft.settings.project_model_bindings.iter()
         .position(|binding| binding.client == client && same_project_path(&binding.path, path));
     let Some(mapping) = allowed_mapping else {
@@ -308,6 +324,7 @@ pub async fn set_project_model(
     };
     let discovered_path = discovered.iter()
         .find(|project| same_project_path(&project.path, path))
+        .filter(|project| Path::new(&project.path).is_dir())
         .map(|project| project.path.clone());
     if existing.is_none() && discovered_path.is_none() {
         return Err("项目目录不在自动发现列表中".to_string());
@@ -338,13 +355,35 @@ Update `apply_config_effects` so project sync runs whenever project bindings cha
 resulting list is empty. `sync_all_project_models_locked` already performs no project-file writes
 for an empty binding list and prunes stale status entries.
 
-- [ ] **Step 7: Run state tests**
+- [ ] **Step 7: Validate the actual bound mapping during sync**
+
+Add a helper that returns the model only when the binding's own `mappingId` is in that client's
+final candidate list. Use it in `sync_all_project_models_locked` instead of looking up any exact
+mapping by model name:
+
+```rust
+fn candidate_model_for_binding(
+    config: &AppConfig,
+    client: &str,
+    mapping_id: &str,
+) -> Option<String> {
+    let candidates = project_model_candidates(config);
+    let list = if client == "codex" { &candidates.codex } else { &candidates.claude };
+    list.iter().find(|candidate| candidate.mapping_id == mapping_id)
+        .map(|candidate| candidate.model.clone())
+}
+```
+
+Add a regression where the bound mapping is disabled while a later duplicate exact mapping remains
+enabled; the bound row must report `binding_invalid`.
+
+- [ ] **Step 8: Run state tests**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --test project_model_state`
 
 Expected: all tests pass.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add src-tauri/src/state.rs src-tauri/src/state/project_models.rs src-tauri/tests/project_model_state.rs
@@ -385,6 +424,7 @@ pub async fn set_project_model(
 }
 ```
 
+`unified_project_models_view` must call `refresh_restart_required()` before reading statuses.
 `refresh_project_models` calls `unified_project_models_view(true)`. Remove
 `open_project_models_window`, `add_project_bindings`, and `remove_project_binding`.
 
@@ -466,7 +506,13 @@ function optionsFor(project, client) {
 existing bindings. Show `sources` as Codex/Claude badges, an unavailable-directory warning, and
 status beneath each select. No add/edit/delete controls. Use the project path as the row key.
 
-- [ ] **Step 4: Add main navigation and remove subwindow routing**
+- [ ] **Step 5: Wire page lifecycle**
+
+On mount, call `store.reload()` and subscribe to `onProjectModelsChanged` with another
+`store.reload()`; unsubscribe on unmount. After a failed set command, `setModel` must call `reload()`
+before returning so the UI discards the unpersisted select value.
+
+- [ ] **Step 6: Add main navigation and remove subwindow routing**
 
 ```js
 const VIEW_ITEMS = [
@@ -480,18 +526,18 @@ const VIEW_ITEMS = [
 
 Render `<ProjectsView v-if="activeView === 'projects'" />`; remove URL query/subwindow logic.
 
-- [ ] **Step 5: Remove mapping-row project entry**
+- [ ] **Step 7: Remove mapping-row project entry**
 
 Delete `canManageProjects`, `onOpenProjects`, the folder `IconButton`, and the action column's extra
 width only if no longer needed.
 
-- [ ] **Step 6: Build the frontend**
+- [ ] **Step 8: Build the frontend**
 
 Run: `npm run build`
 
 Expected: Vite build succeeds.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add src/api/tauriBridge.js src/stores/useProjectModelsStore.js \
