@@ -263,8 +263,12 @@ pub async fn remove_client_dir(
 pub async fn get_project_models(
     state: State<'_, Arc<AppState>>,
     protocol: String,
+    mapping_id: String,
 ) -> Result<Value, String> {
-    match state.project_models_view(&protocol, false).await {
+    match state
+        .project_models_view(&protocol, &mapping_id, false)
+        .await
+    {
         Ok(view) => Ok(json!({
             "success": true,
             "view": serde_json::to_value(view).unwrap_or(Value::Null)
@@ -277,6 +281,7 @@ pub async fn get_project_models(
 pub async fn open_project_models_window(
     app: tauri::AppHandle,
     protocol: String,
+    mapping_id: String,
 ) -> Result<Value, String> {
     let client = match protocol.as_str() {
         "anthropic" => "claude",
@@ -285,6 +290,12 @@ pub async fn open_project_models_window(
     };
     let label = format!("project-models-{client}");
     if let Some(window) = app.get_webview_window(&label) {
+        let query =
+            format!("index.html?window=project-models&protocol={protocol}&mapping={mapping_id}");
+        let _ = window.eval(&format!(
+            "window.location.href = {}",
+            serde_json::to_string(&query).unwrap_or_default()
+        ));
         let _ = window.show();
         let _ = window.set_focus();
         return Ok(json!({ "success": true }));
@@ -293,7 +304,8 @@ pub async fn open_project_models_window(
         &app,
         &label,
         tauri::WebviewUrl::App(
-            format!("index.html?window=project-models&protocol={protocol}").into(),
+            format!("index.html?window=project-models&protocol={protocol}&mapping={mapping_id}")
+                .into(),
         ),
     )
     .title(if client == "codex" {
@@ -313,8 +325,12 @@ pub async fn open_project_models_window(
 pub async fn refresh_project_models(
     state: State<'_, Arc<AppState>>,
     protocol: String,
+    mapping_id: String,
 ) -> Result<Value, String> {
-    match state.project_models_view(&protocol, true).await {
+    match state
+        .project_models_view(&protocol, &mapping_id, true)
+        .await
+    {
         Ok(view) => Ok(json!({
             "success": true,
             "view": serde_json::to_value(view).unwrap_or(Value::Null)
@@ -327,23 +343,13 @@ pub async fn refresh_project_models(
 pub async fn add_project_bindings(
     state: State<'_, Arc<AppState>>,
     protocol: String,
+    mapping_id: String,
     paths: Vec<String>,
-    model: String,
 ) -> Result<Value, String> {
-    match state.add_project_bindings(&protocol, paths, &model).await {
-        Ok(()) => Ok(json!({ "success": true })),
-        Err(error) => Ok(error_value(error)),
-    }
-}
-
-#[tauri::command]
-pub async fn set_project_binding_model(
-    state: State<'_, Arc<AppState>>,
-    protocol: String,
-    id: String,
-    model: String,
-) -> Result<Value, String> {
-    match state.set_project_binding_model(&protocol, &id, &model) {
+    match state
+        .add_project_bindings(&protocol, &mapping_id, paths)
+        .await
+    {
         Ok(()) => Ok(json!({ "success": true })),
         Err(error) => Ok(error_value(error)),
     }

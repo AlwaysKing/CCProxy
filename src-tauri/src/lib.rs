@@ -193,7 +193,6 @@ pub fn run() {
             commands::open_project_models_window,
             commands::refresh_project_models,
             commands::add_project_bindings,
-            commands::set_project_binding_model,
             commands::remove_project_binding,
             commands::get_proxy_status,
             commands::start_proxy,

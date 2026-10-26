@@ -35,9 +35,12 @@ const protocolTabValue = computed({
 
 // 没有供应商时映射没有目标可指，先挡在入口。供应商是全局池，所有协议共用同一份
 const canAdd = computed(() => configStore.providers.length > 0)
-const canManageProjects = computed(() =>
-  props.protocol.id === 'anthropic' || props.protocol.id === 'openai_responses'
-)
+function canManageProjects(mapping) {
+  return (
+    (props.protocol.id === 'anthropic' || props.protocol.id === 'openai_responses') &&
+    !mapping.clientModel.includes('*')
+  )
+}
 
 // 规则形态要一眼能分辨：表格里全是模型名，通配和兜底光看字符串容易漏。
 // 兜底用主色（橙）：蓝色是这套配色里唯一的冷色，挂在表里跟整页不合，且 info 语义偏「提示」，
@@ -155,8 +158,8 @@ function onAdd() {
   dialogVisible.value = true
 }
 
-async function onOpenProjects() {
-  const result = await window.electronAPI.openProjectModelsWindow(props.protocol.id)
+async function onOpenProjects(mapping) {
+  const result = await window.electronAPI.openProjectModelsWindow(props.protocol.id, mapping.id)
   notice.value = result.success ? '' : result.error || '打开项目窗口失败'
 }
 
@@ -190,17 +193,6 @@ async function onConfirmDelete() {
       <template #action>
         <div class="mapping-head-actions">
           <BaseTabs v-model="protocolTabValue" :items="protocolTabs" size="sm" />
-          <IconButton
-            v-if="canManageProjects"
-            size="sm"
-            title="项目默认模型"
-            @click="onOpenProjects"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 7h6l2 2h10v10H3z" />
-              <path d="M3 7V5h7l2 2" />
-            </svg>
-          </IconButton>
           <BaseButton size="sm" @click="onAdd">+ 添加映射</BaseButton>
         </div>
       </template>
@@ -243,6 +235,17 @@ async function onConfirmDelete() {
             <Toggle size="sm" :model-value="row.mapping.enabled" @change="onToggle(row.mapping)" />
           </td>
           <td class="col-actions">
+            <IconButton
+              v-if="canManageProjects(row.mapping)"
+              size="sm"
+              title="项目默认模型"
+              @click="onOpenProjects(row.mapping)"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 7h6l2 2h10v10H3z" />
+                <path d="M3 7V5h7l2 2" />
+              </svg>
+            </IconButton>
             <IconButton size="sm" title="编辑" @click="onEdit(row.mapping)">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M12 20h9" />

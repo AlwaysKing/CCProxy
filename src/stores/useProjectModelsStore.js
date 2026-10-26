@@ -6,9 +6,10 @@ import { logger } from '@/utils/logger'
 const EMPTY_VIEW = {
   protocol: '',
   client: '',
+  mappingId: '',
+  model: '',
   title: '项目默认模型',
   projects: [],
-  modelCandidates: [],
   directoryCandidates: [],
   codexDaemon: null
 }
@@ -23,12 +24,12 @@ export const useProjectModelsStore = defineStore('projectModels', () => {
     view.value = next ? { ...EMPTY_VIEW, ...next } : EMPTY_VIEW
   }
 
-  async function reload(protocol, refresh = false) {
+  async function reload(protocol, mappingId, refresh = false) {
     loading.value = true
     try {
       const result = refresh
-        ? await window.electronAPI.refreshProjectModels(protocol)
-        : await window.electronAPI.getProjectModels(protocol)
+        ? await window.electronAPI.refreshProjectModels(protocol, mappingId)
+        : await window.electronAPI.getProjectModels(protocol, mappingId)
       if (!result.success) throw new Error(result.error || '读取项目模型失败')
       applyView(result.view)
       notice.value = ''
@@ -40,12 +41,12 @@ export const useProjectModelsStore = defineStore('projectModels', () => {
     }
   }
 
-  async function add(protocol, paths, model) {
+  async function add(protocol, mappingId, paths) {
     busy.value = true
     try {
-      const result = await window.electronAPI.addProjectBindings(protocol, paths, model)
+      const result = await window.electronAPI.addProjectBindings(protocol, mappingId, paths)
       if (!result.success) throw new Error(result.error || '添加项目失败')
-      await reload(protocol)
+      await reload(protocol, mappingId)
       return true
     } catch (error) {
       notice.value = error.message || '添加项目失败'
@@ -55,27 +56,12 @@ export const useProjectModelsStore = defineStore('projectModels', () => {
     }
   }
 
-  async function setModel(protocol, id, model) {
-    busy.value = true
-    try {
-      const result = await window.electronAPI.setProjectBindingModel(protocol, id, model)
-      if (!result.success) throw new Error(result.error || '保存项目模型失败')
-      await reload(protocol)
-      return true
-    } catch (error) {
-      notice.value = error.message || '保存项目模型失败'
-      return false
-    } finally {
-      busy.value = false
-    }
-  }
-
-  async function remove(protocol, id) {
+  async function remove(protocol, mappingId, id) {
     busy.value = true
     try {
       const result = await window.electronAPI.removeProjectBinding(protocol, id)
       if (!result.success) throw new Error(result.error || '移除项目失败')
-      await reload(protocol)
+      await reload(protocol, mappingId)
       return true
     } catch (error) {
       notice.value = error.message || '移除项目失败'
@@ -92,7 +78,6 @@ export const useProjectModelsStore = defineStore('projectModels', () => {
     notice,
     reload,
     add,
-    setModel,
     remove
   }
 })

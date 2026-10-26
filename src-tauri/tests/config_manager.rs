@@ -52,7 +52,48 @@ fn legacy_project_models_expand_to_flat_bindings_and_keep_offline_paths() {
                 "manual": true,
                 "hidden": false
             }]
-        }
+        },
+        "providers": [{
+            "id": "p1",
+            "name": "provider",
+            "enabled": true,
+            "baseUrl": "https://example.com",
+            "token": "sk-test",
+            "modelGroups": [
+                { "id": "g-codex", "apiFormat": "openai", "models": [{ "name": "real-codex" }] },
+                { "id": "g-claude", "apiFormat": "anthropic", "models": [{ "name": "real-claude" }] }
+            ]
+        }],
+        "protocols": [
+            {
+                "id": "openai_responses",
+                "name": "OpenAI Responses",
+                "enabled": true,
+                "mappings": [{
+                    "id": "m-codex",
+                    "enabled": true,
+                    "clientModel": "codex-model",
+                    "providerId": "p1",
+                    "modelGroupId": "g-codex",
+                    "upstreamProtocol": "openai_responses",
+                    "realModel": "real-codex"
+                }]
+            },
+            {
+                "id": "anthropic",
+                "name": "Anthropic",
+                "enabled": true,
+                "mappings": [{
+                    "id": "m-claude",
+                    "enabled": true,
+                    "clientModel": "claude-model",
+                    "providerId": "p1",
+                    "modelGroupId": "g-claude",
+                    "upstreamProtocol": "anthropic",
+                    "realModel": "real-claude"
+                }]
+            }
+        ]
     }));
     let config = result.config.unwrap();
     assert_eq!(config.version, 6);
@@ -62,7 +103,15 @@ fn legacy_project_models_expand_to_flat_bindings_and_keep_offline_paths() {
         "/tmp/ccproxy-project-that-does-not-need-to-exist"
     );
     assert_eq!(config.settings.project_model_bindings[0].client, "codex");
+    assert_eq!(
+        config.settings.project_model_bindings[0].mapping_id,
+        "m-codex"
+    );
     assert_eq!(config.settings.project_model_bindings[1].client, "claude");
+    assert_eq!(
+        config.settings.project_model_bindings[1].mapping_id,
+        "m-claude"
+    );
 }
 
 #[test]
@@ -74,29 +123,66 @@ fn project_model_paths_and_ids_are_normalized() {
                     "id": "same",
                     "path": "/tmp/project-a",
                     "client": "codex",
-                    "model": "m1"
+                    "mappingId": "m1"
                 },
                 {
                     "id": "same",
                     "path": "/tmp/project-b",
                     "client": "claude",
-                    "model": "m2"
+                    "mappingId": "m2"
                 },
                 {
                     "id": "duplicate-path",
                     "path": "/tmp/project-a/",
                     "client": "codex",
-                    "model": "m3"
+                    "mappingId": "m3"
                 }
             ]
-        }
+        },
+        "providers": [{
+            "id": "p1",
+            "name": "provider",
+            "enabled": true,
+            "baseUrl": "https://example.com",
+            "token": "sk-test",
+            "modelGroups": [
+                { "id": "g-codex", "apiFormat": "openai", "models": [{ "name": "real-codex" }] },
+                { "id": "g-claude", "apiFormat": "anthropic", "models": [{ "name": "real-claude" }] }
+            ]
+        }],
+        "protocols": [
+            {
+                "id": "openai_responses",
+                "name": "OpenAI Responses",
+                "enabled": true,
+                "mappings": [{
+                    "id": "m1", "enabled": true, "clientModel": "codex-a",
+                    "providerId": "p1", "modelGroupId": "g-codex",
+                    "upstreamProtocol": "openai_responses", "realModel": "real-codex"
+                }, {
+                    "id": "m3", "enabled": true, "clientModel": "codex-b",
+                    "providerId": "p1", "modelGroupId": "g-codex",
+                    "upstreamProtocol": "openai_responses", "realModel": "real-codex"
+                }]
+            },
+            {
+                "id": "anthropic",
+                "name": "Anthropic",
+                "enabled": true,
+                "mappings": [{
+                    "id": "m2", "enabled": true, "clientModel": "claude-a",
+                    "providerId": "p1", "modelGroupId": "g-claude",
+                    "upstreamProtocol": "anthropic", "realModel": "real-claude"
+                }]
+            }
+        ]
     }));
     let config = result.config.unwrap();
     let bindings = config.settings.project_model_bindings;
     assert_eq!(bindings.len(), 2);
     assert_eq!(bindings[0].path, "/tmp/project-a");
     assert_eq!(bindings[0].client, "codex");
-    assert_eq!(bindings[0].model, "m1");
+    assert_eq!(bindings[0].mapping_id, "m1");
     assert_eq!(bindings[1].path, "/tmp/project-b");
     assert_ne!(bindings[0].id, bindings[1].id);
     assert!(result

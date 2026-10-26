@@ -57,13 +57,14 @@ export function installTauriBridge() {
     addClientDir: (dirPath) => invoke('add_client_dir', { path: dirPath }),
     applyClientDir: (dirPath) => invoke('apply_client_dir', { path: dirPath }),
     removeClientDir: (dirId) => invoke('remove_client_dir', { id: dirId }),
-    getProjectModels: (protocol) => invoke('get_project_models', { protocol }),
-    openProjectModelsWindow: (protocol) => invoke('open_project_models_window', { protocol }),
-    refreshProjectModels: (protocol) => invoke('refresh_project_models', { protocol }),
-    addProjectBindings: (protocol, paths, model) =>
-      invoke('add_project_bindings', { protocol, paths, model }),
-    setProjectBindingModel: (protocol, id, model) =>
-      invoke('set_project_binding_model', { protocol, id, model }),
+    getProjectModels: (protocol, mappingId) =>
+      invoke('get_project_models', { protocol, mappingId }),
+    openProjectModelsWindow: (protocol, mappingId) =>
+      invoke('open_project_models_window', { protocol, mappingId }),
+    refreshProjectModels: (protocol, mappingId) =>
+      invoke('refresh_project_models', { protocol, mappingId }),
+    addProjectBindings: (protocol, mappingId, paths) =>
+      invoke('add_project_bindings', { protocol, mappingId, paths }),
     removeProjectBinding: (protocol, id) =>
       invoke('remove_project_binding', { protocol, id }),
     getLogs: () => invoke('get_logs'),

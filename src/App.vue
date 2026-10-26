@@ -27,6 +27,7 @@ const clientDirsStore = useClientDirsStore()
 const windowParams = new URLSearchParams(window.location.search)
 const isProjectModelsWindow = windowParams.get('window') === 'project-models'
 const projectProtocol = windowParams.get('protocol') || 'anthropic'
+const projectMappingId = windowParams.get('mapping') || ''
 
 const activeView = ref('providers')
 const activeProtocolId = ref(null)
@@ -78,7 +79,7 @@ onUnmounted(() => {
 
 <template>
   <div v-if="isProjectModelsWindow" class="app-subwindow">
-    <ProjectsView :protocol-id="projectProtocol" />
+    <ProjectsView :protocol-id="projectProtocol" :mapping-id="projectMappingId" />
   </div>
 
   <div v-else class="app-shell">

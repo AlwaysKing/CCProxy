@@ -10,8 +10,8 @@ use serde_json::json;
 use super::{AppState, ProjectSyncStatusSnapshot};
 use crate::clients::project_models::{
     apply_project_model, claude_settings_root, codex_project_trust, discover_default_projects,
-    discovery_candidates, project_binding_list, project_model_candidates, DiscoveredProject,
-    ProjectBindingListItem, ProjectSyncResult, ProjectSyncState,
+    discovery_candidates, project_binding_list, DiscoveredProject, ProjectBindingListItem,
+    ProjectSyncResult, ProjectSyncState,
 };
 use crate::config::{create_config_id, AppConfig, ProjectModelBinding};
 use crate::logger;
@@ -30,9 +30,10 @@ pub struct ProjectModelRow {
 pub struct ProjectModelsView {
     pub protocol: String,
     pub client: String,
+    pub mapping_id: String,
+    pub model: String,
     pub title: String,
     pub projects: Vec<ProjectModelRow>,
-    pub model_candidates: Vec<String>,
     pub directory_candidates: Vec<String>,
     pub codex_daemon: Option<crate::clients::daemon::CodexDaemon>,
 }
@@ -50,6 +51,15 @@ fn client_for_protocol(protocol: &str) -> Option<(&'static str, &'static str)> {
         "openai_responses" => Some(("codex", "Codex")),
         _ => None,
     }
+}
+
+fn mapping_model(config: &AppConfig, protocol: &str, mapping_id: &str) -> Option<String> {
+    config
+        .protocol(protocol)?
+        .mappings
+        .iter()
+        .find(|mapping| mapping.id == mapping_id && !mapping.client_model.contains('*'))
+        .map(|mapping| mapping.client_model.clone())
 }
 
 fn same_project_path(left: &str, right: &str) -> bool {
@@ -118,6 +128,26 @@ impl AppState {
             .and_then(|daemon| daemon.pid);
         let mut claude_roots: HashMap<PathBuf, String> = HashMap::new();
         for binding in &config.settings.project_model_bindings {
+            let protocol = if binding.client == "codex" {
+                "openai_responses"
+            } else {
+                "anthropic"
+            };
+            let Some(model) = mapping_model(config, protocol, &binding.mapping_id) else {
+                self.record_project_sync(
+                    &binding.id,
+                    &binding.client,
+                    ProjectSyncResult {
+                        status: ProjectSyncState::BindingInvalid,
+                        file: None,
+                        changed: false,
+                        message: Some("项目绑定引用的映射已删除、失效或不是精确模型".to_string()),
+                    },
+                    None,
+                    None,
+                );
+                continue;
+            };
             if binding.client == "claude" {
                 let root = claude_root(&binding.path);
                 if let Some(owner) = claude_roots.get(&root) {
@@ -142,8 +172,7 @@ impl AppState {
             let codex_trusted = (binding.client == "codex" && self.handle().is_some())
                 .then(|| codex_project_trust(&binding.path, &codex_home()))
                 .flatten();
-            let result =
-                apply_project_model(config, &binding.path, &binding.client, &binding.model);
+            let result = apply_project_model(config, &binding.path, &binding.client, &model);
             if result.status != ProjectSyncState::Ok {
                 logger::warn(
                     "[ProjectModels] 同步未完成",
@@ -239,19 +268,22 @@ impl AppState {
     pub async fn project_models_view(
         self: &Arc<Self>,
         protocol: &str,
+        mapping_id: &str,
         refresh: bool,
     ) -> Result<ProjectModelsView, String> {
         let (client, title) =
             client_for_protocol(protocol).ok_or_else(|| "该协议不支持项目默认模型".to_string())?;
         self.refresh_restart_required();
         let config = self.config_snapshot();
+        let model = mapping_model(&config, protocol, mapping_id)
+            .ok_or_else(|| "映射不存在或不是精确模型".to_string())?;
         let discovered = self.ensure_project_candidates(refresh).await;
         let statuses = self
             .project_sync_status
             .read()
             .map(|value| value.clone())
             .unwrap_or_default();
-        let projects = project_binding_list(&config, client)
+        let projects = project_binding_list(&config, client, mapping_id)
             .into_iter()
             .map(|binding| {
                 let codex_trusted = (client == "codex" && self.handle().is_some())
@@ -273,16 +305,13 @@ impl AppState {
                 }
             })
             .collect();
-        let model_candidates = match client {
-            "codex" => project_model_candidates(&config).codex,
-            _ => project_model_candidates(&config).claude,
-        };
         Ok(ProjectModelsView {
             protocol: protocol.to_string(),
             client: client.to_string(),
-            title: format!("项目默认模型 · {title}"),
+            mapping_id: mapping_id.to_string(),
+            model: model.clone(),
+            title: format!("{title} 项目 · {model}"),
             projects,
-            model_candidates,
             directory_candidates: discovery_candidates(&discovered, client),
             codex_daemon: (client == "codex").then(|| self.codex_daemon()).flatten(),
         })
@@ -296,15 +325,11 @@ impl AppState {
     pub async fn add_project_bindings(
         self: &Arc<Self>,
         protocol: &str,
+        mapping_id: &str,
         paths: Vec<String>,
-        model: &str,
     ) -> Result<(), String> {
         let (client, _) =
             client_for_protocol(protocol).ok_or_else(|| "该协议不支持项目默认模型".to_string())?;
-        let model = model.trim();
-        if model.is_empty() || model.contains('*') {
-            return Err("请选择一个精确的默认模型".to_string());
-        }
         let candidates = self.ensure_project_candidates(false).await;
         let allowed: HashSet<String> = discovery_candidates(&candidates, client)
             .into_iter()
@@ -314,14 +339,8 @@ impl AppState {
             .lock()
             .map_err(|_| "配置事务锁不可用".to_string())?;
         let mut draft = self.config_snapshot();
-        let candidates = project_model_candidates(&draft);
-        let models = if client == "codex" {
-            &candidates.codex
-        } else {
-            &candidates.claude
-        };
-        if !models.iter().any(|candidate| candidate == model) {
-            return Err(format!("模型 {model} 不在当前协议的精确候选里"));
+        if mapping_model(&draft, protocol, mapping_id).is_none() {
+            return Err("映射不存在或不是精确模型".to_string());
         }
         for raw_path in paths {
             let path = std::fs::canonicalize(raw_path.trim())
@@ -356,46 +375,9 @@ impl AppState {
                     id: create_config_id("b"),
                     path,
                     client: client.to_string(),
-                    model: model.to_string(),
+                    mapping_id: mapping_id.to_string(),
                 });
         }
-        self.save_project_draft_locked(&draft)?;
-        Ok(())
-    }
-
-    pub fn set_project_binding_model(
-        self: &Arc<Self>,
-        protocol: &str,
-        binding_id: &str,
-        model: &str,
-    ) -> Result<(), String> {
-        let (client, _) =
-            client_for_protocol(protocol).ok_or_else(|| "该协议不支持项目默认模型".to_string())?;
-        let model = model.trim();
-        if model.is_empty() || model.contains('*') {
-            return Err("请选择一个精确的默认模型".to_string());
-        }
-        let _guard = self
-            .config_transaction
-            .lock()
-            .map_err(|_| "配置事务锁不可用".to_string())?;
-        let mut draft = self.config_snapshot();
-        let index = draft
-            .settings
-            .project_model_bindings
-            .iter()
-            .position(|binding| binding.id == binding_id && binding.client == client)
-            .ok_or_else(|| "项目绑定不存在".to_string())?;
-        let candidates = project_model_candidates(&draft);
-        let models = if client == "codex" {
-            &candidates.codex
-        } else {
-            &candidates.claude
-        };
-        if !models.iter().any(|candidate| candidate == model) {
-            return Err(format!("模型 {model} 不在当前协议的精确候选里"));
-        }
-        draft.settings.project_model_bindings[index].model = model.to_string();
         self.save_project_draft_locked(&draft)?;
         Ok(())
     }

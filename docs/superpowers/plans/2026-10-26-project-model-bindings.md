@@ -3,7 +3,7 @@
 > 2026-10-26 最终交互调整：以
 > [项目默认模型设计](../specs/2026-10-26-project-model-bindings-design.md) 为准。取消总开关和顶部
 > Tab；项目图标位于模型映射页，Anthropic / OpenAI Responses 分别打开子窗口；会话目录候选在
-> 后台缓存一次。
+> 后台缓存一次。项目图标位于每条精确映射的操作列，模型由该映射固定，子窗口只添加目录。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

@@ -56,7 +56,7 @@ pub struct ProjectModelBinding {
     pub id: String,
     pub path: String,
     pub client: String,
-    pub model: String,
+    pub mapping_id: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -876,6 +876,7 @@ fn normalize_project_model(
 // 项目临时离线不能让一次无关保存把绑定删掉。存在性在发现、添加和同步阶段检查。
 fn normalize_project_bindings(
     settings: &Value,
+    protocols: &[Protocol],
     issues: &mut Vec<String>,
 ) -> Vec<ProjectModelBinding> {
     let current = settings.get("projectModelBindings");
@@ -907,16 +908,24 @@ fn normalize_project_bindings(
         };
 
         let is_legacy = current.is_none();
-        let candidates: Vec<(&str, Option<&Value>)> = if is_legacy {
+        let candidates: Vec<(&str, Option<&Value>, Option<&str>)> = if is_legacy {
             vec![
-                ("codex", item.get("codexModel")),
-                ("claude", item.get("claudeModel")),
+                (
+                    "codex",
+                    item.get("codexModel"),
+                    item.get("mappingId").and_then(as_str),
+                ),
+                (
+                    "claude",
+                    item.get("claudeModel"),
+                    item.get("mappingId").and_then(as_str),
+                ),
             ]
         } else {
             let client = item.get("client").and_then(as_str).unwrap_or("");
-            vec![(client, item.get("model"))]
+            vec![(client, None, item.get("mappingId").and_then(as_str))]
         };
-        for (client, raw_model) in candidates {
+        for (client, legacy_model, raw_mapping_id) in candidates {
             if client != "codex" && client != "claude" {
                 issues.push(format!(
                     "项目绑定 {path} 的 client 非法（{client}），已丢弃"
@@ -948,14 +957,64 @@ fn normalize_project_bindings(
                     }
                 }
             }
-            let Some(model) = normalize_project_model(raw_model, &id, issues) else {
+            let mapping_id = if let Some(mapping_id) = raw_mapping_id
+                .map(str::trim)
+                .filter(|mapping_id| !mapping_id.is_empty())
+            {
+                mapping_id.to_string()
+            } else if let Some(raw_model) = legacy_model {
+                let Some(model) = normalize_project_model(Some(raw_model), &id, issues) else {
+                    continue;
+                };
+                let protocol_id = if client == "codex" {
+                    "openai_responses"
+                } else {
+                    "anthropic"
+                };
+                let Some(mapping_id) = protocols
+                    .iter()
+                    .find(|protocol| protocol.id == protocol_id)
+                    .and_then(|protocol| {
+                        protocol.mappings.iter().find(|mapping| {
+                            mapping.client_model == model && !mapping.client_model.contains('*')
+                        })
+                    })
+                    .map(|mapping| mapping.id.clone())
+                else {
+                    issues.push(format!(
+                        "旧项目绑定 {path} 的模型 {model} 找不到精确映射，已丢弃"
+                    ));
+                    continue;
+                };
+                mapping_id
+            } else {
+                issues.push(format!("项目绑定 {path} 缺少 mappingId，已丢弃"));
                 continue;
             };
+            let protocol_id = if client == "codex" {
+                "openai_responses"
+            } else {
+                "anthropic"
+            };
+            let mapping_exists = protocols
+                .iter()
+                .find(|protocol| protocol.id == protocol_id)
+                .is_some_and(|protocol| {
+                    protocol.mappings.iter().any(|mapping| {
+                        mapping.id == mapping_id && !mapping.client_model.contains('*')
+                    })
+                });
+            if !mapping_exists {
+                issues.push(format!(
+                    "项目绑定 {path} 的 mappingId {mapping_id} 不存在或不是精确映射，已丢弃"
+                ));
+                continue;
+            }
             bindings.push(ProjectModelBinding {
                 id,
                 path: path.clone(),
                 client: client.to_string(),
-                model,
+                mapping_id,
             });
         }
     }
@@ -1292,7 +1351,7 @@ pub fn validate_config(raw: &Value) -> Validated {
                 .unwrap_or("")
                 .trim()
                 .to_string(),
-            project_model_bindings: normalize_project_bindings(settings, &mut issues),
+            project_model_bindings: normalize_project_bindings(settings, &protocols, &mut issues),
         },
         providers,
         protocols,

@@ -37,7 +37,7 @@ pub struct ProjectBindingListItem {
     pub id: String,
     pub path: String,
     pub client: String,
-    pub model: String,
+    pub mapping_id: String,
     pub missing: bool,
 }
 
@@ -318,17 +318,21 @@ pub fn discover_default_projects() -> Vec<DiscoveredProject> {
     discover_from_roots(&codex_root, &claude_root)
 }
 
-pub fn project_binding_list(config: &AppConfig, client: &str) -> Vec<ProjectBindingListItem> {
+pub fn project_binding_list(
+    config: &AppConfig,
+    client: &str,
+    mapping_id: &str,
+) -> Vec<ProjectBindingListItem> {
     config
         .settings
         .project_model_bindings
         .iter()
-        .filter(|binding| binding.client == client)
+        .filter(|binding| binding.client == client && binding.mapping_id == mapping_id)
         .map(|binding| ProjectBindingListItem {
             id: binding.id.clone(),
             path: binding.path.clone(),
             client: binding.client.clone(),
-            model: binding.model.clone(),
+            mapping_id: binding.mapping_id.clone(),
             missing: !Path::new(&binding.path).is_dir(),
         })
         .collect()

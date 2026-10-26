@@ -3,10 +3,13 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useProjectModelsStore } from '@/stores/useProjectModelsStore'
 import { Badge, BaseButton, BaseDialog, BaseInput, EmptyState, FormField } from '@/components/base'
-import AppSelect from '@/components/base/AppSelect.vue'
 
 const props = defineProps({
   protocolId: {
+    type: String,
+    required: true
+  },
+  mappingId: {
     type: String,
     required: true
   }
@@ -15,7 +18,6 @@ const props = defineProps({
 const store = useProjectModelsStore()
 const addVisible = ref(false)
 const selectedPaths = ref([])
-const addModel = ref('')
 const search = ref('')
 const candidateSearch = ref('')
 let unsubscribe = null
@@ -29,10 +31,6 @@ const STATUS_META = {
   restart_required: { label: '待重启 Codex', variant: 'warning' },
   requires_project_trust: { label: '需信任项目', variant: 'warning' }
 }
-
-const modelOptions = computed(() =>
-  store.view.modelCandidates.map((model) => ({ value: model, label: model }))
-)
 
 const filteredProjects = computed(() => {
   const needle = search.value.trim().toLowerCase()
@@ -62,19 +60,20 @@ function toggleCandidate(path) {
 function openAdd() {
   selectedPaths.value = []
   candidateSearch.value = ''
-  addModel.value = store.view.modelCandidates[0] || ''
   addVisible.value = true
 }
 
 async function confirmAdd() {
-  if (!selectedPaths.value.length || !addModel.value) return
-  const ok = await store.add(props.protocolId, selectedPaths.value, addModel.value)
+  if (!selectedPaths.value.length) return
+  const ok = await store.add(props.protocolId, props.mappingId, selectedPaths.value)
   if (ok) addVisible.value = false
 }
 
 onMounted(() => {
-  store.reload(props.protocolId)
-  unsubscribe = window.electronEvents.onProjectModelsChanged(() => store.reload(props.protocolId))
+  store.reload(props.protocolId, props.mappingId)
+  unsubscribe = window.electronEvents.onProjectModelsChanged(() =>
+    store.reload(props.protocolId, props.mappingId)
+  )
 })
 
 onUnmounted(() => {
@@ -96,7 +95,7 @@ onUnmounted(() => {
           variant="secondary"
           size="sm"
           :loading="store.loading"
-          @click="store.reload(protocolId, true)"
+          @click="store.reload(protocolId, mappingId, true)"
         >
           刷新候选
         </BaseButton>
@@ -129,15 +128,7 @@ onUnmounted(() => {
               <code :title="project.path">{{ project.path }}</code>
               <span v-if="project.missing" class="project-warning">目录暂不可用</span>
             </td>
-            <td>
-              <AppSelect
-                :model-value="project.model"
-                :options="modelOptions"
-                :disabled="store.busy || !modelOptions.length"
-                full-width
-                @change="store.setModel(protocolId, project.id, $event.value)"
-              />
-            </td>
+            <td><code>{{ store.view.model }}</code></td>
             <td>
               <Badge :variant="statusMeta(project).variant" size="sm">
                 {{ statusMeta(project).label }}
@@ -153,7 +144,7 @@ onUnmounted(() => {
                 variant="ghost"
                 size="sm"
                 :disabled="store.busy"
-                @click="store.remove(protocolId, project.id)"
+                @click="store.remove(protocolId, mappingId, project.id)"
               >移除</BaseButton>
             </td>
           </tr>
@@ -191,13 +182,9 @@ onUnmounted(() => {
       title="添加项目"
       width="680px"
     >
-      <FormField label="初始默认模型" required>
-        <AppSelect v-model="addModel" :options="modelOptions" full-width />
-      </FormField>
-
       <FormField
         label="会话目录候选"
-        :hint="`已选 ${selectedPaths.length} 个目录`"
+        :hint="`默认模型 ${store.view.model} · 已选 ${selectedPaths.length} 个目录`"
       >
         <BaseInput v-model="candidateSearch" size="sm" placeholder="搜索候选目录" />
         <div v-if="availableCandidates.length" class="candidate-list">
@@ -223,7 +210,7 @@ onUnmounted(() => {
         <BaseButton
           size="sm"
           :loading="store.busy"
-          :disabled="!selectedPaths.length || !addModel"
+          :disabled="!selectedPaths.length"
           @click="confirmAdd"
         >添加 {{ selectedPaths.length ? `(${selectedPaths.length})` : '' }}</BaseButton>
       </template>

@@ -5,23 +5,23 @@
 
 ## 一句话
 
-在模型映射页按协议打开项目默认模型子窗口：Anthropic 管理 Claude 项目，OpenAI Responses
-管理 Codex 项目；后台从全局会话目录中扫描一次候选，用户批量加入项目后自动维护对应客户端
-配置里的顶层 `model`。
+在每条精确映射的操作列打开项目默认模型子窗口：模型直接取该映射的 `clientModel`，用户只需
+批量加入目录。Anthropic 管理 Claude 项目，OpenAI Responses 管理 Codex 项目；后台从全局
+会话目录中扫描一次候选。
 
 ## 核心决策
 
 | 项 | 决策 |
 |---|---|
-| 功能入口 | 模型映射页标题操作区增加项目图标 |
-| 可见范围 | 仅 Anthropic 与 OpenAI Responses 显示；OpenAI Chat 不显示 |
-| 管理界面 | 按当前协议打开独立子窗口，不做顶部 Tab、不占设置页 |
+| 功能入口 | 每条映射行的操作列增加项目图标 |
+| 可见范围 | 仅 Anthropic 与 OpenAI Responses 下不含 `*` 的精确映射显示 |
+| 管理界面 | 按当前映射打开独立子窗口，不做顶部 Tab、不占设置页 |
 | 总开关 | 移除；功能常驻，但没有项目绑定时不写任何文件 |
-| 数据粒度 | 一条绑定对应一个项目路径和一个协议/客户端模型 |
+| 数据粒度 | 一条绑定对应一个项目路径、一个客户端和一条映射 |
 | 目录来源 | 后台扫描 Codex / Claude 全局会话目录，缓存为添加候选 |
 | 候选刷新 | 启动时扫描一次；子窗口可手动刷新，不随页面切换重复扫描 |
-| 添加流程 | 批量选择目录，并为这批目录选择一个初始模型 |
-| 编辑流程 | 每个项目一行，可修改模型或移除绑定 |
+| 添加流程 | 子窗口内只批量选择目录；模型由映射固定 |
+| 编辑流程 | 每个目录一行，可查看固定模型、状态和移除绑定 |
 | 移除语义 | 只删 CCProxy 绑定，不删除、不回滚项目配置 |
 | 映射变化 | 自动刷新所有有效项目绑定 |
 | 请求路径 | 不在代理请求中实时识别或写项目配置 |
@@ -37,25 +37,24 @@
 
 ## 用户界面
 
-`MappingModule` 标题操作区按顺序显示协议 Tabs、项目图标按钮和“+ 添加映射”按钮。
+`MappingModule` 每行映射的操作区显示项目图标：
 
-项目图标：
-
-- 仅在 `anthropic` 与 `openai_responses` 显示。
+- 仅在 `anthropic` 与 `openai_responses` 下显示。
+- 仅 `clientModel` 不含 `*` 的映射显示；通配和兜底 `*` 不显示。
 - 使用文件夹/项目类图标，悬停提示“项目默认模型”。
-- 点击后打开按当前协议隔离的子窗口；重复点击时聚焦或重建为当前协议窗口。
+- 点击后打开绑定到该映射的子窗口；重复点击时聚焦或在该窗口切换映射上下文。
 
-子窗口标题显示“项目默认模型 · Claude”或“项目默认模型 · Codex”。内容只包含当前协议的绑定、
-模型候选和目录候选，并提供“添加项目”和“刷新候选”。
+子窗口标题显示客户端与固定模型，例如“Claude 项目 · claude-sonnet”或
+“Codex 项目 · gpt-model”。内容只包含该映射的目录绑定和对应客户端目录候选，并提供
+“添加项目”和“刷新候选”。
 
-每个项目一行，展示路径、默认 `clientModel`、同步状态与错误详情，可修改模型或移除绑定。
+每个项目一行，展示路径、固定 `clientModel`、同步状态与错误详情，可移除绑定。
 
 添加弹窗：
 
 - 只展示当前协议对应来源的候选目录。
 - 已在当前协议绑定的目录禁用。
 - 支持多选。
-- 选择一个初始模型，统一应用到所选项。
 - 确认后逐个创建绑定并立即同步。
 
 ### 协议与来源
@@ -80,22 +79,23 @@
       "id": "b_xxx",
       "path": "/absolute/project/path",
       "client": "codex",
-      "model": "client-model-a"
+      "mappingId": "m_xxx"
     }
   ]
 }
 ```
 
 - `client` 只能是 `codex` 或 `claude`。
-- 同一 `(path, client)` 只能有一条绑定。
+- 同一 `(path, client)` 只能有一条绑定，避免两个映射同时覆盖同一项目。
+- `mappingId` 必须指向当前协议中的精确映射；映射删除或改成通配后绑定标为失效。
 - ID 必须全局唯一。
 - 路径只做绝对路径的纯字符串归一化，不访问文件系统；暂时离线的项目保留配置。
 - 模型为空、含通配符或字段类型非法时，该绑定归一化失败并产生 issue。
 
-为兼容开发期间产生的中间配置，读取时若存在旧的 `projectModelProjects`，将其两个模型字段
-展开成独立的 `client + model` 绑定，随后写出新结构。
+为兼容开发期间产生的中间配置，读取时若存在旧的 `projectModelProjects`，按其中的精确模型
+找到对应映射，展开成独立的 `client + mappingId` 绑定，随后写出新结构。
 
-## 目录与模型候选
+## 目录候选与固定模型
 
 `AppState` 增加运行时目录候选缓存，不写入 `app.json`：
 
@@ -106,14 +106,8 @@
 - 扫描在阻塞任务中执行，单次刷新只允许一个任务；session 文件只读取首条 metadata，
   设置单行字节上限，解析失败、权限错误和超限文件跳过。
 
-模型候选：
-
-- Claude 使用 `anthropic` 协议映射。
-- Codex 使用 `openai_responses` 协议映射。
-- 只展示协议、供应商、模型组和映射均有效、`clientModel` 非空且不含 `*` 的精确名称。
-- 候选去重并保持当前映射优先级顺序。
-
-写入前模型必须能通过代理路由器解析。通配规则命中的具体模型允许绑定，但不进入精确候选列表。
+写入时从绑定的 `mappingId` 读取当前 `clientModel`；映射被编辑后项目默认模型随之更新。
+子窗口不提供模型选择器。
 
 ## 写入与同步
 
@@ -153,11 +147,10 @@ TOML 先用完整解析器验证文件、顶层 `model` 类型和重复键，再
 
 | 命令 | 作用 |
 |---|---|
-| `get_project_models` | 按协议返回绑定、模型候选、目录候选和状态 |
-| `refresh_project_models` | 重新扫描当前协议的目录候选 |
-| `open_project_models_window` | 按协议打开或重建项目子窗口 |
-| `add_project_bindings` | 批量添加目录并应用统一初始模型 |
-| `set_project_binding_model` | 修改一条绑定的模型 |
+| `get_project_models` | 按协议和映射返回固定模型、绑定、目录候选和状态 |
+| `refresh_project_models` | 重新扫描当前客户端的目录候选 |
+| `open_project_models_window` | 按协议和映射打开或更新项目子窗口 |
+| `add_project_bindings` | 批量添加目录，模型取映射当前值 |
 | `remove_project_binding` | 移除绑定，不删除项目文件 |
 
 命令参数使用 `protocol`，主进程映射为 `client`，避免前端重复维护协议到客户端的规则。
@@ -167,10 +160,10 @@ TOML 先用完整解析器验证文件、顶层 `model` 类型和重复键，再
 | 文件 | 改动 |
 |---|---|
 | `src-tauri/src/config.rs` | v6 扁平绑定、中间结构迁移、归一化 |
-| `src-tauri/src/clients/project_models.rs` | 会话候选、模型候选、写入与状态 |
+| `src-tauri/src/clients/project_models.rs` | 会话候选、映射模型解析、写入与状态 |
 | `src-tauri/src/state/project_models.rs` | 候选缓存、绑定事务、同步与子窗口数据 |
 | `src-tauri/src/commands.rs` / `lib.rs` | 新命令注册 |
-| `src/views/providers/components/MappingModule.vue` | 标题操作区项目图标 |
+| `src/views/providers/components/MappingModule.vue` | 精确映射行操作区的项目图标 |
 | `src/views/projects/ProjectsView.vue` | 协议隔离子窗口 |
 | `src/stores/useProjectModelsStore.js` | 当前协议子窗口状态 |
 | `src/App.vue` | 识别子窗口路由，不增加顶部导航 |
@@ -181,13 +174,13 @@ TOML 先用完整解析器验证文件、顶层 `model` 类型和重复键，再
 - v6 归一化、中间结构迁移、重复路径和重复 ID。
 - Codex / Claude 候选扫描、客户端过滤、路径规范化和缓存刷新。
 - 跳过 `$HOME`、文件系统根目录和客户端配置根目录。
-- 精确模型候选过滤、通配模型路由写入。
-- 批量添加、模型修改、移除、同路径不同客户端绑定。
+- 映射 `clientModel` 修改后绑定自动使用新值。
+- 批量添加、移除、同路径不同客户端绑定。
 - JSON / TOML 写入、备份、软链接边界和坏文件保护。
 - Claude Git 根、worktree 主 checkout 与同作用域冲突。
 - 映射变化自动同步；无绑定不写文件。
 - Codex 信任和 daemon 状态。
-- 项目图标仅在支持的协议显示，子窗口按协议隔离。
+- 项目图标仅在支持的协议和精确映射显示，子窗口按映射隔离。
 
 发布前验证：
 
