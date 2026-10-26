@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tauri::{Manager, State};
+use tauri::State;
 
 use crate::clients::{
     apply_client_config, daemon, detect_dir_kind, inspect_client_config, scan_client_dirs,
@@ -260,109 +260,35 @@ pub async fn remove_client_dir(
 }
 
 #[tauri::command]
-pub async fn get_project_models(
+pub async fn get_project_models(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    let view = state.unified_project_models_view(false).await;
+    Ok(json!({
+        "success": true,
+        "view": serde_json::to_value(view).unwrap_or(Value::Null)
+    }))
+}
+
+#[tauri::command]
+pub async fn refresh_project_models(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    let view = state.unified_project_models_view(true).await;
+    Ok(json!({
+        "success": true,
+        "view": serde_json::to_value(view).unwrap_or(Value::Null)
+    }))
+}
+
+#[tauri::command]
+pub async fn set_project_model(
     state: State<'_, Arc<AppState>>,
-    protocol: String,
-    mapping_id: String,
+    path: String,
+    client: String,
+    mapping_id: Option<String>,
 ) -> Result<Value, String> {
     match state
-        .project_models_view(&protocol, &mapping_id, false)
+        .set_project_model(path.trim(), &client, mapping_id.as_deref())
         .await
     {
-        Ok(view) => Ok(json!({
-            "success": true,
-            "view": serde_json::to_value(view).unwrap_or(Value::Null)
-        })),
-        Err(error) => Ok(error_value(error)),
-    }
-}
-
-#[tauri::command]
-pub async fn open_project_models_window(
-    app: tauri::AppHandle,
-    protocol: String,
-    mapping_id: String,
-) -> Result<Value, String> {
-    let client = match protocol.as_str() {
-        "anthropic" => "claude",
-        "openai_responses" => "codex",
-        _ => return Ok(error_value("该协议不支持项目默认模型")),
-    };
-    let label = format!("project-models-{client}");
-    if let Some(window) = app.get_webview_window(&label) {
-        let query =
-            format!("index.html?window=project-models&protocol={protocol}&mapping={mapping_id}");
-        let _ = window.eval(&format!(
-            "window.location.href = {}",
-            serde_json::to_string(&query).unwrap_or_default()
-        ));
-        let _ = window.show();
-        let _ = window.set_focus();
-        return Ok(json!({ "success": true }));
-    }
-    tauri::WebviewWindowBuilder::new(
-        &app,
-        &label,
-        tauri::WebviewUrl::App(
-            format!("index.html?window=project-models&protocol={protocol}&mapping={mapping_id}")
-                .into(),
-        ),
-    )
-    .title(if client == "codex" {
-        "项目默认模型 · Codex"
-    } else {
-        "项目默认模型 · Claude"
-    })
-    .inner_size(1040.0, 720.0)
-    .min_inner_size(840.0, 560.0)
-    .resizable(true)
-    .build()
-    .map_err(|error| error.to_string())?;
-    Ok(json!({ "success": true }))
-}
-
-#[tauri::command]
-pub async fn refresh_project_models(
-    state: State<'_, Arc<AppState>>,
-    protocol: String,
-    mapping_id: String,
-) -> Result<Value, String> {
-    match state
-        .project_models_view(&protocol, &mapping_id, true)
-        .await
-    {
-        Ok(view) => Ok(json!({
-            "success": true,
-            "view": serde_json::to_value(view).unwrap_or(Value::Null)
-        })),
-        Err(error) => Ok(error_value(error)),
-    }
-}
-
-#[tauri::command]
-pub async fn add_project_bindings(
-    state: State<'_, Arc<AppState>>,
-    protocol: String,
-    mapping_id: String,
-    paths: Vec<String>,
-) -> Result<Value, String> {
-    match state
-        .add_project_bindings(&protocol, &mapping_id, paths)
-        .await
-    {
-        Ok(()) => Ok(json!({ "success": true })),
-        Err(error) => Ok(error_value(error)),
-    }
-}
-
-#[tauri::command]
-pub async fn remove_project_binding(
-    state: State<'_, Arc<AppState>>,
-    protocol: String,
-    id: String,
-) -> Result<Value, String> {
-    match state.remove_project_binding(&protocol, &id) {
-        Ok(()) => Ok(json!({ "success": true })),
+        Ok(status) => Ok(json!({ "success": true, "status": status })),
         Err(error) => Ok(error_value(error)),
     }
 }

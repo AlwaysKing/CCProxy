@@ -287,9 +287,9 @@ fn project_identity(raw: &str) -> String {
 
 Build a `BTreeMap<String, UnifiedProjectRow>` from discovered rows first, then saved bindings.
 For each binding, set only that client's mapping/model. Derive current model from its mapping even
-when the candidate is disabled. Attach status by binding ID and Codex trust. Sort bound rows first,
-then by `lastActivityMs` descending and path ascending. Return global candidates from
-`project_model_candidates`.
+when the candidate is disabled. Attach status by binding ID and Codex trust. Sort all rows by full
+project path ascending; the confirmed UX requires a stable directory order. Return global
+candidates from `project_model_candidates`.
 
 - [ ] **Step 5: Implement set/clear transaction**
 

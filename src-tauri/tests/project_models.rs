@@ -4,7 +4,7 @@ use serde_json::json;
 
 use ccproxy_lib::clients::project_models::{
     apply_project_model, claude_settings_root, discover_projects, project_model_candidates,
-    ProjectSyncState,
+    ProjectModelCandidate, ProjectSyncState,
 };
 use ccproxy_lib::config::AppConfig;
 
@@ -121,8 +121,94 @@ fn discovery_merges_codex_and_claude_for_one_project() {
 #[test]
 fn model_candidates_use_exact_enabled_mappings_only() {
     let candidates = project_model_candidates(&routing_config());
-    assert_eq!(candidates.codex, vec!["codex-alias"]);
-    assert_eq!(candidates.claude, vec!["claude-alias"]);
+    assert_eq!(
+        candidates.codex,
+        vec![ProjectModelCandidate {
+            mapping_id: "m-codex".to_string(),
+            model: "codex-alias".to_string(),
+            invalid: false,
+        }]
+    );
+    assert_eq!(
+        candidates.claude,
+        vec![ProjectModelCandidate {
+            mapping_id: "m-claude".to_string(),
+            model: "claude-alias".to_string(),
+            invalid: false,
+        }]
+    );
+}
+
+#[test]
+fn model_candidates_follow_first_match_routing() {
+    let config = config_from(json!({
+        "version": 6,
+        "providers": [{
+            "id": "p1",
+            "name": "provider",
+            "enabled": true,
+            "baseUrl": "https://example.com",
+            "token": "sk-test",
+            "modelGroups": [{
+                "id": "g1",
+                "apiFormat": "anthropic",
+                "models": [{ "name": "real" }]
+            }]
+        }],
+        "protocols": [{
+            "id": "anthropic",
+            "name": "Anthropic",
+            "enabled": true,
+            "mappings": [
+                {
+                    "id": "wild",
+                    "enabled": true,
+                    "clientModel": "claude-3*",
+                    "providerId": "p1",
+                    "modelGroupId": "g1",
+                    "upstreamProtocol": "anthropic",
+                    "realModel": "real"
+                },
+                {
+                    "id": "shadowed",
+                    "enabled": true,
+                    "clientModel": "claude-3",
+                    "providerId": "p1",
+                    "modelGroupId": "g1",
+                    "upstreamProtocol": "anthropic",
+                    "realModel": "real"
+                },
+                {
+                    "id": "duplicate-ok",
+                    "enabled": true,
+                    "clientModel": "claude-free",
+                    "providerId": "p1",
+                    "modelGroupId": "g1",
+                    "upstreamProtocol": "anthropic",
+                    "realModel": "real"
+                },
+                {
+                    "id": "duplicate-shadowed",
+                    "enabled": true,
+                    "clientModel": "claude-free",
+                    "providerId": "p1",
+                    "modelGroupId": "g1",
+                    "upstreamProtocol": "anthropic",
+                    "realModel": "real"
+                }
+            ]
+        }]
+    }));
+
+    let candidates = project_model_candidates(&config);
+    assert_eq!(
+        candidates
+            .claude
+            .iter()
+            .map(|item| item.mapping_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["duplicate-ok"]
+    );
 }
 
 #[test]

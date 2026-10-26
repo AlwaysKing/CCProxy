@@ -31,21 +31,19 @@ pub struct DiscoveredProject {
     pub last_activity_ms: Option<i64>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ProjectBindingListItem {
-    pub id: String,
-    pub path: String,
-    pub client: String,
+pub struct ProjectModelCandidate {
     pub mapping_id: String,
-    pub missing: bool,
+    pub model: String,
+    pub invalid: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectModelCandidates {
-    pub codex: Vec<String>,
-    pub claude: Vec<String>,
+    pub codex: Vec<ProjectModelCandidate>,
+    pub claude: Vec<ProjectModelCandidate>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -318,71 +316,51 @@ pub fn discover_default_projects() -> Vec<DiscoveredProject> {
     discover_from_roots(&codex_root, &claude_root)
 }
 
-pub fn project_binding_list(
-    config: &AppConfig,
-    client: &str,
-    mapping_id: &str,
-) -> Vec<ProjectBindingListItem> {
-    config
-        .settings
-        .project_model_bindings
-        .iter()
-        .filter(|binding| binding.client == client && binding.mapping_id == mapping_id)
-        .map(|binding| ProjectBindingListItem {
-            id: binding.id.clone(),
-            path: binding.path.clone(),
-            client: binding.client.clone(),
-            mapping_id: binding.mapping_id.clone(),
-            missing: !Path::new(&binding.path).is_dir(),
-        })
-        .collect()
-}
-
-pub fn discovery_candidates(discovered: &[DiscoveredProject], client: &str) -> Vec<String> {
-    discovered
-        .iter()
-        .filter(|project| match client {
-            "codex" => project.sources.codex,
-            "claude" => project.sources.claude,
-            _ => false,
-        })
-        .map(|project| project.path.clone())
-        .collect()
-}
-
-fn protocol_candidates(config: &AppConfig, protocol_id: &str) -> Vec<String> {
-    let Some(protocol) = config.protocol(protocol_id) else {
+fn protocol_candidates(config: &AppConfig, protocol_id: &str) -> Vec<ProjectModelCandidate> {
+    let Some(protocol) = config
+        .protocol(protocol_id)
+        .filter(|protocol| protocol.enabled)
+    else {
         return Vec::new();
     };
-    if !protocol.enabled {
-        return Vec::new();
-    }
-    let mut names = Vec::new();
-    for mapping in &protocol.mappings {
-        if !mapping.enabled
-            || mapping.client_model.is_empty()
-            || mapping.client_model.contains('*')
-            || names.iter().any(|name| name == &mapping.client_model)
+    let usable = protocol
+        .mappings
+        .iter()
+        .filter(|mapping| {
+            if !mapping.enabled {
+                return false;
+            }
+            let Some(provider) = config
+                .providers
+                .iter()
+                .find(|provider| provider.id == mapping.provider_id && provider.enabled)
+            else {
+                return false;
+            };
+            provider
+                .model_groups
+                .iter()
+                .any(|group| group.id == mapping.model_group_id)
+        })
+        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    for (index, mapping) in usable.iter().enumerate() {
+        if mapping.client_model.is_empty() || mapping.client_model.contains('*') {
+            continue;
+        }
+        if usable[..index]
+            .iter()
+            .any(|earlier| crate::proxy::router::match_mapping(earlier, &mapping.client_model))
         {
             continue;
         }
-        let Some(provider) = config
-            .providers
-            .iter()
-            .find(|provider| provider.id == mapping.provider_id && provider.enabled)
-        else {
-            continue;
-        };
-        if !provider
-            .model_groups
-            .iter()
-            .any(|group| group.id == mapping.model_group_id)
-        {
-            continue;
-        }
-        names.push(mapping.client_model.clone());
+        candidates.push(ProjectModelCandidate {
+            mapping_id: mapping.id.clone(),
+            model: mapping.client_model.clone(),
+            invalid: false,
+        });
     }
-    names
+    candidates
 }
 
 pub fn project_model_candidates(config: &AppConfig) -> ProjectModelCandidates {

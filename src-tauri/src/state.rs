@@ -296,9 +296,7 @@ impl AppState {
         if protocols_changed {
             self.sync_managed_codex_catalogs();
         }
-        if (projects_changed || protocols_changed || providers_changed)
-            && !next.settings.project_model_bindings.is_empty()
-        {
+        if projects_changed || protocols_changed || providers_changed {
             self.sync_all_project_models_locked(next);
         }
     }
