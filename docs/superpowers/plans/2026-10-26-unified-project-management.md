@@ -28,6 +28,9 @@ The Vue page consumes that view from the main navigation and no longer opens a p
 - `src/api/tauriBridge.js`: unified command bridge.
 - `src/stores/useProjectModelsStore.js`: unified page state and set/refresh actions.
 - `src/views/projects/ProjectsView.vue`: project table with two model selects.
+- `src/views/projects/components/ProjectStatusIcon.vue`: focusable inline status icon with a
+  viewport-positioned Teleport tooltip.
+- `src/components/base/AppSelect.vue`: expose the full option label via `title` in the menu.
 - `src/App.vue`: add “项目管理” after “模型映射”; remove subwindow route.
 - `src/views/providers/components/MappingModule.vue`: remove per-row project icon and window call.
 
@@ -558,7 +561,15 @@ an unavailable-directory warning, and an inline status icon after each select. N
 the project path as the row key.
 
 `store.setModel` sends `mappingId || null` to the bridge so an empty select value becomes Rust
-`None`, while the row's select model stays `''` and displays “不设置（停止托管）”.
+`None`, while the row's select model stays `''` and the closed trigger displays “未设置”.
+
+Add `title` to every `AppSelect` option button so long model names remain distinguishable when
+the visible label is ellipsized. Pass `menu-min-width="360px"` from the project selects.
+
+Create `ProjectStatusIcon.vue` with `client`, `status`, and `message` props. It renders a focusable
+`role="img"` circle whose decorative glyph is `aria-hidden`, builds an accessible label from the
+client, localized status, and message, and uses a body-level Teleport tooltip positioned above the
+icon or below when there is not enough top space.
 
 - [ ] **Step 5: Wire page lifecycle**
 
@@ -622,7 +633,13 @@ Run: `npm run build`
 
 Expected: Vite build succeeds.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 9: Verify status layout in the browser**
+
+Render mock rows with success, warning, error, and neutral statuses. Confirm the first and last rows
+show complete tooltips at the minimum window width, long model names remain readable in the open
+menu, and “未设置” is visually weaker than a configured select.
+
+- [ ] **Step 10: Commit**
 
 ```bash
 git add src/api/tauriBridge.js src/stores/useProjectModelsStore.js \
