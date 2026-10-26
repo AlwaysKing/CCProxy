@@ -34,7 +34,8 @@ pub fn now_iso() -> String {
 // 用它区分「开机自启」与「用户手动打开」：前者保持后台静默，后者照常亮出主界面。
 // 判断口径跟 auto-launch 在 macOS 上认的关键字一致，--minimized 一并兼容。
 fn is_hidden_launch(args: &[String]) -> bool {
-    args.iter().any(|arg| arg == "--hidden" || arg == "--minimized")
+    args.iter()
+        .any(|arg| arg == "--hidden" || arg == "--minimized")
 }
 
 fn bootstrap(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -106,6 +107,7 @@ fn bootstrap(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
     app.manage(state.clone());
     state.proxy.init(state.clone());
+    state.prime_project_candidates();
 
     // 启动时按配置同步一次副作用：用户可能在系统设置里关掉了自启，而配置里还写着 true
     let snapshot = state.config_snapshot();
@@ -187,6 +189,11 @@ pub fn run() {
             commands::add_client_dir,
             commands::apply_client_dir,
             commands::remove_client_dir,
+            commands::get_project_models,
+            commands::open_project_models_window,
+            commands::refresh_project_models,
+            commands::add_project_bindings,
+            commands::remove_project_binding,
             commands::get_proxy_status,
             commands::start_proxy,
             commands::stop_proxy,
@@ -213,4 +220,3 @@ pub fn run() {
             }
         });
 }
-

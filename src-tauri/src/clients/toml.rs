@@ -126,12 +126,12 @@ fn parse_section_name(trimmed: &str) -> String {
     if !trimmed.starts_with('[') {
         return String::new();
     }
-    // 数组表 [[x]] 我们不管，当普通文本，免得跟节名混起来
-    if trimmed.starts_with("[[") {
-        return String::new();
-    }
+    // 数组表也必须切换 section：否则 [[tools]] 里的 model 会被误当成顶层键。
+    let array = trimmed.starts_with("[[");
+    let close = if array { "]]" } else { "]" };
+    let start = if array { 2 } else { 1 };
     let bytes = trimmed.as_bytes();
-    let mut index = 1;
+    let mut index = start;
     let mut quote: u8 = 0;
     while index < bytes.len() {
         let byte = bytes[index];
@@ -141,19 +141,24 @@ fn parse_section_name(trimmed: &str) -> String {
             }
         } else if byte == b'"' || byte == b'\'' {
             quote = byte;
-        } else if byte == b']' {
+        } else if trimmed[index..].starts_with(close) {
             break;
         }
         index += 1;
     }
-    if index >= bytes.len() {
-        return String::new(); // 没有闭合的 ]
+    if index >= bytes.len() || !trimmed[index..].starts_with(close) {
+        return String::new();
     }
-    let rest = trimmed[index + 1..].trim();
+    let rest = trimmed[index + close.len()..].trim();
     if !rest.is_empty() && !rest.starts_with('#') {
-        return String::new(); // ] 后面只允许行尾注释
+        return String::new();
     }
-    normalize_section_path(&trimmed[1..index])
+    let name = normalize_section_path(&trimmed[start..index]);
+    if array {
+        format!("[[{name}]]")
+    } else {
+        name
+    }
 }
 
 // 键值行：键可以是裸的、双引号包住的或单引号包住的（[model_providers."a.b"] 那种带点的名字）
@@ -174,7 +179,9 @@ fn match_entry(trimmed: &str) -> Option<(&str, &str)> {
         }
         _ => {
             while index < bytes.len()
-                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_' || bytes[index] == b'-')
+                && (bytes[index].is_ascii_alphanumeric()
+                    || bytes[index] == b'_'
+                    || bytes[index] == b'-')
             {
                 index += 1;
             }
@@ -303,7 +310,8 @@ pub fn scan_toml_lines(text: &str) -> TomlScan {
         let equals = trimmed.find('=').unwrap_or(0);
         let after_equals = &trimmed[equals + 1..];
         let value_text = after_equals.trim();
-        let value_start = offset + equals + 1 + (after_equals.len() - after_equals.trim_start().len());
+        let value_start =
+            offset + equals + 1 + (after_equals.len() - after_equals.trim_start().len());
         lines.push(TomlLine {
             text: raw_text.to_string(),
             eol: raw_eol.to_string(),
@@ -316,7 +324,9 @@ pub fn scan_toml_lines(text: &str) -> TomlScan {
         });
 
         for delimiter in MULTILINE_DELIMITERS {
-            if value_literal.starts_with(delimiter) && !value_literal[delimiter.len()..].contains(delimiter) {
+            if value_literal.starts_with(delimiter)
+                && !value_literal[delimiter.len()..].contains(delimiter)
+            {
                 multiline = delimiter.to_string();
             }
         }
@@ -327,4 +337,3 @@ pub fn scan_toml_lines(text: &str) -> TomlScan {
         unterminated: !multiline.is_empty(),
     }
 }
-

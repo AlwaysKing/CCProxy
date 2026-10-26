@@ -6,94 +6,21 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
 use serde_json::Value;
 
-use crate::clients::catalog::{catalog_file_path, empty_catalog_text, rewrite_catalog, CATALOG_FILE, CATALOG_KEY, ExpectedEntry};
+use crate::clients::catalog::{
+    catalog_file_path, empty_catalog_text, rewrite_catalog, ExpectedEntry, CATALOG_FILE,
+    CATALOG_KEY,
+};
 use crate::clients::check::{inspect_client_config, InspectContext};
 use crate::clients::json::set_object_values;
 use crate::clients::toml::{scan_toml_lines, LineKind};
+use crate::clients::write::write_if_changed;
 use crate::config::ClientDir;
 
-const BACKUP_SUFFIX: &str = ".ccproxy-bak";
-const TEMP_SUFFIX: &str = ".ccproxy-tmp";
 // codex 那边由 CCProxy 维护的 provider id：认它就知道哪些内容归我们管，别的块一概不碰
 pub const CODEX_PROVIDER_ID: &str = "ccproxy";
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WriteResult {
-    pub file: String,
-    pub backup_path: Option<String>,
-    pub changed: bool,
-}
-
-#[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
-}
-
-#[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) {}
-
-#[cfg(unix)]
-fn file_mode(path: &Path) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-    fs::metadata(path).map(|meta| meta.permissions().mode() & 0o777).unwrap_or(0o600)
-}
-
-#[cfg(not(unix))]
-fn file_mode(_path: &Path) -> u32 {
-    0o600
-}
-
-// 原子写：同目录下的临时文件 + rename，避免写一半掉电留下半个配置文件。
-// 权限沿用原文件的——这是用户的配置，不该因为我们写过就换了权限
-fn write_file_atomic(target_path: &Path, content: &str) -> Result<(), String> {
-    let mode = file_mode(target_path);
-    let temp_path = PathBuf::from(format!("{}{TEMP_SUFFIX}", target_path.to_string_lossy()));
-    // 上次崩溃可能留下同名的临时文件，它的权限是旧的，先清掉再写
-    let _ = fs::remove_file(&temp_path);
-    fs::write(&temp_path, content).map_err(|error| error.to_string())?;
-    // write 的权限只是「请求值」，新建文件时会被 umask 削一道，显式 chmod 才是真的沿用原文件权限
-    set_mode(&temp_path, mode);
-    fs::rename(&temp_path, target_path).map_err(|error| error.to_string())
-}
-
-// 配置文件本身是软链时，写它指向的真实文件。rename 会把链接本身换成普通文件——
-// 用 dotfiles 仓库管配置的人会因此丢掉链接，而他仓库里那份反而不更新。
-// 只在确实是软链时才解开：普通文件保持原路径，免得把 /var 这类系统软链也一起解开
-fn resolve_target(file_path: &Path) -> PathBuf {
-    if fs::symlink_metadata(file_path).map(|meta| meta.file_type().is_symlink()).unwrap_or(false) {
-        if let Ok(real) = fs::canonicalize(file_path) {
-            return real;
-        }
-    }
-    file_path.to_path_buf()
-}
-
-fn backup_file(target_path: &Path) -> Option<String> {
-    if !target_path.exists() {
-        return None;
-    }
-    let backup_path = PathBuf::from(format!("{}{BACKUP_SUFFIX}", target_path.to_string_lossy()));
-    fs::copy(target_path, &backup_path).ok()?;
-    Some(backup_path.to_string_lossy().to_string())
-}
-
-// 内容没变化就不落盘：不为一个字节都没改的文件动备份与 mtime。
-// changed 标记跟着返回——新建文件没有备份可留，不能拿 backupPath 判「写没写」
-fn write_if_changed(file_path: &Path, text: &str, changed: bool) -> Result<WriteResult, String> {
-    let file = file_path.to_string_lossy().to_string();
-    if !changed {
-        return Ok(WriteResult { file, backup_path: None, changed: false });
-    }
-    let target = resolve_target(file_path);
-    let backup_path = backup_file(&target);
-    write_file_atomic(&target, text)?;
-    Ok(WriteResult { file, backup_path, changed: true })
-}
+pub use crate::clients::write::WriteResult;
 
 fn apply_claude_config(dir_path: &str, port: u16, token: &str) -> Result<Vec<WriteResult>, String> {
     let file_path = Path::new(dir_path).join("settings.json");
@@ -106,13 +33,23 @@ fn apply_claude_config(dir_path: &str, port: u16, token: &str) -> Result<Vec<Wri
         &text,
         "env",
         &[
-            ("ANTHROPIC_BASE_URL".to_string(), Value::String(format!("http://127.0.0.1:{port}"))),
-            ("ANTHROPIC_AUTH_TOKEN".to_string(), Value::String(token.to_string())),
+            (
+                "ANTHROPIC_BASE_URL".to_string(),
+                Value::String(format!("http://127.0.0.1:{port}")),
+            ),
+            (
+                "ANTHROPIC_AUTH_TOKEN".to_string(),
+                Value::String(token.to_string()),
+            ),
         ],
     )
     .map_err(|error| format!("settings.json {error}"))?;
 
-    Ok(vec![write_if_changed(&file_path, &next.text, next.changed)?])
+    Ok(vec![write_if_changed(
+        &file_path,
+        &next.text,
+        next.changed,
+    )?])
 }
 
 // 我们那个 provider 块的内容。requires_openai_auth 必须显式写 false：
@@ -123,15 +60,122 @@ fn build_codex_provider_entries(port: u16, token: &str) -> Vec<String> {
         format!("base_url = \"http://127.0.0.1:{port}/v1\""),
         "wire_api = \"responses\"".to_string(),
         "requires_openai_auth = false".to_string(),
-        format!("experimental_bearer_token = {}", serde_json::to_string(token).unwrap_or_default()),
+        format!(
+            "experimental_bearer_token = {}",
+            serde_json::to_string(token).unwrap_or_default()
+        ),
     ]
+}
+
+fn toml_basic_string(value: &str) -> String {
+    let mut encoded = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '"' => encoded.push_str("\\\""),
+            '\\' => encoded.push_str("\\\\"),
+            '\u{08}' => encoded.push_str("\\b"),
+            '\t' => encoded.push_str("\\t"),
+            '\n' => encoded.push_str("\\n"),
+            '\u{0c}' => encoded.push_str("\\f"),
+            '\r' => encoded.push_str("\\r"),
+            character if character <= '\u{1f}' || character == '\u{7f}' => {
+                encoded.push_str(&format!("\\u{:04X}", character as u32));
+            }
+            character => encoded.push(character),
+        }
+    }
+    encoded.push('"');
+    encoded
+}
+
+fn valid_codex_model_toml(text: &str) -> Result<(), String> {
+    text.parse::<toml_edit::DocumentMut>()
+        .map(|_| ())
+        .map_err(|error| format!("config.toml 不是合法 TOML，为免写坏已放弃：{error}"))
+}
+
+// 项目级绑定只改顶层 model。常规值与多行字符串都只替换 model 的值区间，
+// 其余行尾、注释、缩进和键序原样保留；最后交给完整 TOML 解析器校验结构。
+pub fn rewrite_codex_model(text: &str, model: &str) -> Result<String, String> {
+    valid_codex_model_toml(text)?;
+    let scan = scan_toml_lines(text);
+    if scan.unterminated {
+        return Err("config.toml 里有多行字符串没闭合，为免写坏已放弃".to_string());
+    }
+    let encoded = toml_basic_string(model);
+    let mut line_start = 0usize;
+    for line in &scan.lines {
+        if line.kind == LineKind::Entry && line.section.is_empty() && line.key == "model" {
+            let value_start = line_start + line.value_start;
+            let rest = &text[value_start..];
+            let delimiter = if rest.starts_with("\"\"\"") {
+                Some("\"\"\"")
+            } else if rest.starts_with("'''") {
+                Some("'''")
+            } else {
+                None
+            };
+            let value_end = if let Some(delimiter) = delimiter {
+                rest[delimiter.len()..]
+                    .find(delimiter)
+                    .map(|index| value_start + delimiter.len() + index + delimiter.len())
+                    .ok_or_else(|| "config.toml 的 model 多行字符串没有闭合".to_string())?
+            } else {
+                line_start + line.value_end
+            };
+            if !delimiter.is_some() && line.value == model {
+                return Ok(text.to_string());
+            }
+            let next = format!("{}{}{}", &text[..value_start], encoded, &text[value_end..]);
+            valid_codex_model_toml(&next)?;
+            return Ok(next);
+        }
+        line_start += line.text.len() + line.eol.len();
+    }
+
+    let first_section = scan
+        .lines
+        .iter()
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.text.len() + line.eol.len();
+            Some((start, line))
+        })
+        .find(|(_, line)| line.kind == LineKind::Section)
+        .map(|(offset, _)| offset);
+    let eol = scan
+        .lines
+        .iter()
+        .find(|line| !line.eol.is_empty())
+        .map(|line| line.eol.as_str())
+        .unwrap_or("\n");
+    let line = format!("model = {encoded}{eol}");
+    let next = if let Some(offset) = first_section {
+        format!("{}{}{}", &text[..offset], line, &text[offset..])
+    } else if text.is_empty() {
+        line
+    } else {
+        let mut output = text.to_string();
+        if !output.ends_with('\n') && !output.ends_with('\r') {
+            output.push_str(eol);
+        }
+        output.push_str(&line);
+        output
+    };
+    valid_codex_model_toml(&next)?;
+    Ok(next)
 }
 
 // 逐行改写：顶层 model_provider 指向我们，[model_providers.ccproxy] 整块重写成上面的内容，
 // catalogPath 有值时顶层 model_catalog_json 一并指向我们的模型清单，其余行（用户自己的
 // provider 块、projects、features、多行字符串）连同它们自己的行尾原样搬过去——
 // CRLF 的文件改完还是 CRLF，末尾没有换行的也不给加上
-pub fn rewrite_codex_config(text: &str, port: u16, token: &str, catalog_path: Option<&str>) -> Result<String, String> {
+pub fn rewrite_codex_config(
+    text: &str,
+    port: u16,
+    token: &str,
+    catalog_path: Option<&str>,
+) -> Result<String, String> {
     let section_name = format!("model_providers.{CODEX_PROVIDER_ID}");
     let scan = scan_toml_lines(text);
     // 三引号没闭合的文件不是合法 TOML，扫描器会把后面整段都当成字符串内容，
@@ -143,7 +187,10 @@ pub fn rewrite_codex_config(text: &str, port: u16, token: &str, catalog_path: Op
     let entries = build_codex_provider_entries(port, token);
     // 路径里的反斜杠引号 JSON.stringify 转出来的就是 TOML 基本串的写法，直接用
     let catalog_line = match catalog_path {
-        Some(path) => format!("{CATALOG_KEY} = {}", serde_json::to_string(path).unwrap_or_default()),
+        Some(path) => format!(
+            "{CATALOG_KEY} = {}",
+            serde_json::to_string(path).unwrap_or_default()
+        ),
         None => String::new(),
     };
     let mut output: Vec<String> = Vec::new();
@@ -160,7 +207,11 @@ pub fn rewrite_codex_config(text: &str, port: u16, token: &str, catalog_path: Op
         }
         // 这一行自己没带行尾（文件末尾那种）时，我们在它前后插的行用文件惯用的行尾
         let nl = if line.eol.is_empty() {
-            if file_eol.is_empty() { "\n".to_string() } else { file_eol.clone() }
+            if file_eol.is_empty() {
+                "\n".to_string()
+            } else {
+                file_eol.clone()
+            }
         } else {
             line.eol.clone()
         };
@@ -216,7 +267,11 @@ pub fn rewrite_codex_config(text: &str, port: u16, token: &str, catalog_path: Op
             continue;
         }
 
-        if !catalog_line.is_empty() && line.kind == LineKind::Entry && line.section.is_empty() && line.key == CATALOG_KEY {
+        if !catalog_line.is_empty()
+            && line.kind == LineKind::Entry
+            && line.section.is_empty()
+            && line.key == CATALOG_KEY
+        {
             let path = catalog_path.unwrap_or("");
             if line.value == path {
                 // 已经指对了：整行原样留着
@@ -240,7 +295,11 @@ pub fn rewrite_codex_config(text: &str, port: u16, token: &str, catalog_path: Op
     }
 
     if !wrote_provider {
-        let nl = if file_eol.is_empty() { "\n".to_string() } else { file_eol.clone() };
+        let nl = if file_eol.is_empty() {
+            "\n".to_string()
+        } else {
+            file_eol.clone()
+        };
         let written = output.join("");
         // 追加在末尾：原文最后一行若没有行尾，得先补一个，不然就和我们的块粘在一起了；
         // 再空一行把我们那个块和用户的内容隔开
@@ -267,12 +326,21 @@ pub fn rewrite_codex_config(text: &str, port: u16, token: &str, catalog_path: Op
     Ok(output.join(""))
 }
 
-fn apply_codex_config(dir_path: &str, port: u16, token: &str, catalog: &[ExpectedEntry]) -> Result<Vec<WriteResult>, String> {
+fn apply_codex_config(
+    dir_path: &str,
+    port: u16,
+    token: &str,
+    catalog: &[ExpectedEntry],
+) -> Result<Vec<WriteResult>, String> {
     let config_path = Path::new(dir_path).join("config.toml");
     let config_text = fs::read_to_string(&config_path).unwrap_or_default();
     // 有归我们管的模型时才管清单：catalog 为空说明 OpenAI 协议下一条映射都没启用，
     // 而 codex 拒绝加载空清单——写一份只有壳的进去反而把人家弄坏
-    let catalog_path = if catalog.is_empty() { None } else { Some(catalog_file_path(dir_path)) };
+    let catalog_path = if catalog.is_empty() {
+        None
+    } else {
+        Some(catalog_file_path(dir_path))
+    };
 
     // 两个文件的改写都先算完（坏 JSON、没闭合的多行字符串在这一步抛），再动磁盘——
     // 免得 config.toml 写好了、models.json 却放弃，留下半套状态
@@ -282,11 +350,16 @@ fn apply_codex_config(dir_path: &str, port: u16, token: &str, catalog: &[Expecte
     if catalog_path.is_some() {
         let file_path = Path::new(dir_path).join(CATALOG_FILE);
         let text = fs::read_to_string(&file_path).unwrap_or_else(|_| empty_catalog_text());
-        let next = rewrite_catalog(&text, catalog).map_err(|error| format!("{CATALOG_FILE} {error}"))?;
+        let next =
+            rewrite_catalog(&text, catalog).map_err(|error| format!("{CATALOG_FILE} {error}"))?;
         catalog_write = Some((file_path, next.text, next.changed));
     }
 
-    let mut results = vec![write_if_changed(&config_path, &next_config, next_config != config_text)?];
+    let mut results = vec![write_if_changed(
+        &config_path,
+        &next_config,
+        next_config != config_text,
+    )?];
     if let Some((file_path, text, changed)) = catalog_write {
         results.push(write_if_changed(&file_path, &text, changed)?);
     }
@@ -295,7 +368,13 @@ fn apply_codex_config(dir_path: &str, port: u16, token: &str, catalog: &[Expecte
 
 // 写入一个目录的客户端配置。context = (port, token, catalog)，返回动到的文件清单
 // （含各自的备份路径；内容没变的文件 backupPath 为 null 且不落盘）
-pub fn apply_client_config(dir_path: &str, kind: &str, port: u16, token: &str, catalog: &[ExpectedEntry]) -> Result<Vec<WriteResult>, String> {
+pub fn apply_client_config(
+    dir_path: &str,
+    kind: &str,
+    port: u16,
+    token: &str,
+    catalog: &[ExpectedEntry],
+) -> Result<Vec<WriteResult>, String> {
     // 空 token 写进去会把客户端的认证一起写坏（比不改更糟），宁可不写
     if token.is_empty() {
         return Err("CCProxy 还没有客户端 token，无法写入".to_string());
@@ -315,7 +394,12 @@ pub struct SyncResult {
 // 配置一变就把已归我们管的 codex 目录的模型清单刷新到最新，用户不用再手动点「应用」。
 // 「归我们管」的判据是地址与 token 都对（不带清单口径检查——清单不一致正是这次要改的）；
 // 没应用过的目录不替用户做主，留着等他在设置页手动应用
-pub fn sync_codex_catalogs(entries: &[ClientDir], port: u16, token: &str, catalog: &[ExpectedEntry]) -> SyncResult {
+pub fn sync_codex_catalogs(
+    entries: &[ClientDir],
+    port: u16,
+    token: &str,
+    catalog: &[ExpectedEntry],
+) -> SyncResult {
     let mut applied = Vec::new();
     let mut errors = Vec::new();
     for entry in entries {
@@ -333,4 +417,3 @@ pub fn sync_codex_catalogs(entries: &[ClientDir], port: u16, token: &str, catalo
     }
     SyncResult { applied, errors }
 }
-

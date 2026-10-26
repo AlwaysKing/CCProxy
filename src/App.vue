@@ -11,6 +11,7 @@ import ProvidersView from '@/views/providers/ProvidersView.vue'
 import LogsView from '@/views/logs/LogsView.vue'
 import UsageView from '@/views/usage/UsageView.vue'
 import SettingsView from '@/views/settings/SettingsView.vue'
+import ProjectsView from '@/views/projects/ProjectsView.vue'
 
 // 页面入口。模型映射页内部再切换客户端协议。
 const VIEW_ITEMS = [
@@ -23,6 +24,10 @@ const VIEW_ITEMS = [
 const configStore = useConfigStore()
 const proxyStore = useProxyStore()
 const clientDirsStore = useClientDirsStore()
+const windowParams = new URLSearchParams(window.location.search)
+const isProjectModelsWindow = windowParams.get('window') === 'project-models'
+const projectProtocol = windowParams.get('protocol') || 'anthropic'
+const projectMappingId = windowParams.get('mapping') || ''
 
 const activeView = ref('providers')
 const activeProtocolId = ref(null)
@@ -45,6 +50,9 @@ async function onToggleProxy() {
 let unsubscribes = []
 
 onMounted(async () => {
+  if (isProjectModelsWindow) {
+    return
+  }
   unsubscribes.push(window.electronEvents.onConfigChanged((payload) => configStore.applyState(payload)))
   unsubscribes.push(window.electronEvents.onProxyStatusChanged((payload) => proxyStore.apply(payload)))
   await Promise.all([configStore.init(), proxyStore.init()])
@@ -70,7 +78,11 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div v-if="isProjectModelsWindow" class="app-subwindow">
+    <ProjectsView :protocol-id="projectProtocol" :mapping-id="projectMappingId" />
+  </div>
+
+  <div v-else class="app-shell">
     <header class="app-topbar" data-tauri-drag-region="deep">
       <span class="app-title">CCProxy</span>
 
@@ -131,6 +143,12 @@ onUnmounted(() => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
+}
+
+.app-subwindow {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* 全宽顶部工具条：整条可拖拽，红绿灯嵌在左侧（trafficLightPosition 18 正好落在 48px 高度的中线）。

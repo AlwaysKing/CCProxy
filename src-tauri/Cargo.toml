@@ -37,6 +37,7 @@ uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
 dirs = "5"
 url = "2"
+toml_edit = "0.25"
 
 [profile.release]
 codegen-units = 1

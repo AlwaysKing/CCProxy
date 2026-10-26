@@ -19,6 +19,8 @@ CCProxy 把这些收在一处：
   Claude / OpenAI；每条映射明确选择 Anthropic、OpenAI Chat 或 OpenAI Responses 上游协议
 - 供应商是全局池：同一家上游配一次，地址与 token 共用，三个协议的映射表按供应商 + 模型组引用
 - 请求日志与用量统计分两页：tokens 按天 / 协议 / 供应商 / 模型聚合
+- 项目模型：每条精确映射的操作区提供项目图标，打开按映射隔离的子窗口；目录候选来自
+  Codex / Claude 全局会话缓存，批量加入后只写项目配置里的默认 `model`
 - codex 的 `models.json` 模型清单跟着映射表自动刷新，不用手工维护；codex 的 app-server daemon
   只在启动时读一次 `config.toml` 与模型清单，改完设置页会提醒执行 `codex app-server daemon restart`
 

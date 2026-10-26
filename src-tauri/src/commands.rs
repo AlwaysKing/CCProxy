@@ -5,9 +5,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{Manager, State};
 
-use crate::clients::{apply_client_config, daemon, detect_dir_kind, inspect_client_config, scan_client_dirs};
+use crate::clients::{
+    apply_client_config, daemon, detect_dir_kind, inspect_client_config, scan_client_dirs,
+};
 use crate::config::{create_config_id, ClientDir};
 use crate::logger;
 use crate::proxy::fetch_models::fetch_upstream_models;
@@ -20,9 +22,17 @@ fn error_value(error: impl ToString) -> Value {
 #[tauri::command]
 pub async fn get_app_state(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let config = state.config_snapshot();
-    let issues = state.issues.read().map(|value| value.clone()).unwrap_or_default();
+    let issues = state
+        .issues
+        .read()
+        .map(|value| value.clone())
+        .unwrap_or_default();
     let recovered = state.recovered.read().map(|value| *value).unwrap_or(false);
-    let backup_path = state.backup_path.read().ok().and_then(|value| value.clone());
+    let backup_path = state
+        .backup_path
+        .read()
+        .ok()
+        .and_then(|value| value.clone());
     let proxy = state.proxy_status();
     Ok(json!({
         "success": true,
@@ -54,11 +64,14 @@ pub async fn save_config(state: State<'_, Arc<AppState>>, config: Value) -> Resu
 #[tauri::command]
 pub async fn regenerate_client_token(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     match state.regenerate_client_token() {
-        Ok((config, reapplied, errors)) => {
-            Ok(json!({ "success": true, "config": config, "reapplied": reapplied, "errors": errors }))
-        }
+        Ok((config, reapplied, errors)) => Ok(
+            json!({ "success": true, "config": config, "reapplied": reapplied, "errors": errors }),
+        ),
         Err(error) => {
-            logger::error("[Config] 重新生成客户端 token 失败", Some(&json!({ "error": error })));
+            logger::error(
+                "[Config] 重新生成客户端 token 失败",
+                Some(&json!({ "error": error })),
+            );
             Ok(error_value(error))
         }
     }
@@ -143,7 +156,10 @@ pub async fn pick_client_dir(app: tauri::AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn add_client_dir(state: State<'_, Arc<AppState>>, path: String) -> Result<Value, String> {
+pub async fn add_client_dir(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+) -> Result<Value, String> {
     let target = path.trim();
     if target.is_empty() {
         return Ok(error_value("没有选择目录"));
@@ -178,14 +194,20 @@ pub async fn add_client_dir(state: State<'_, Arc<AppState>>, path: String) -> Re
     if let Err(error) = state.persist_client_dirs(dirs) {
         return Ok(error_value(error));
     }
-    logger::info("[ClientDirs] 已添加手动目录", Some(&json!({ "kind": kind, "path": target })));
+    logger::info(
+        "[ClientDirs] 已添加手动目录",
+        Some(&json!({ "kind": kind, "path": target })),
+    );
     Ok(json!({ "success": true, "kind": kind }))
 }
 
 // 把 CCProxy 的地址与 token 写进该目录的配置文件。只认扫描出来的目录：
 // 渲染层传什么路径就写什么的话，这条口就成了「往任意文件写内容」
 #[tauri::command]
-pub async fn apply_client_dir(state: State<'_, Arc<AppState>>, path: String) -> Result<Value, String> {
+pub async fn apply_client_dir(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+) -> Result<Value, String> {
     let target = path.trim();
     let config = state.config_snapshot();
     let scan = scan_client_dirs(None, &config.settings.client_dirs);
@@ -220,7 +242,10 @@ pub async fn apply_client_dir(state: State<'_, Arc<AppState>>, path: String) -> 
 }
 
 #[tauri::command]
-pub async fn remove_client_dir(state: State<'_, Arc<AppState>>, id: String) -> Result<Value, String> {
+pub async fn remove_client_dir(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Value, String> {
     let config = state.config_snapshot();
     let dirs: Vec<ClientDir> = config
         .settings
@@ -235,9 +260,119 @@ pub async fn remove_client_dir(state: State<'_, Arc<AppState>>, id: String) -> R
 }
 
 #[tauri::command]
+pub async fn get_project_models(
+    state: State<'_, Arc<AppState>>,
+    protocol: String,
+    mapping_id: String,
+) -> Result<Value, String> {
+    match state
+        .project_models_view(&protocol, &mapping_id, false)
+        .await
+    {
+        Ok(view) => Ok(json!({
+            "success": true,
+            "view": serde_json::to_value(view).unwrap_or(Value::Null)
+        })),
+        Err(error) => Ok(error_value(error)),
+    }
+}
+
+#[tauri::command]
+pub async fn open_project_models_window(
+    app: tauri::AppHandle,
+    protocol: String,
+    mapping_id: String,
+) -> Result<Value, String> {
+    let client = match protocol.as_str() {
+        "anthropic" => "claude",
+        "openai_responses" => "codex",
+        _ => return Ok(error_value("该协议不支持项目默认模型")),
+    };
+    let label = format!("project-models-{client}");
+    if let Some(window) = app.get_webview_window(&label) {
+        let query =
+            format!("index.html?window=project-models&protocol={protocol}&mapping={mapping_id}");
+        let _ = window.eval(&format!(
+            "window.location.href = {}",
+            serde_json::to_string(&query).unwrap_or_default()
+        ));
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(json!({ "success": true }));
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        &label,
+        tauri::WebviewUrl::App(
+            format!("index.html?window=project-models&protocol={protocol}&mapping={mapping_id}")
+                .into(),
+        ),
+    )
+    .title(if client == "codex" {
+        "项目默认模型 · Codex"
+    } else {
+        "项目默认模型 · Claude"
+    })
+    .inner_size(1040.0, 720.0)
+    .min_inner_size(840.0, 560.0)
+    .resizable(true)
+    .build()
+    .map_err(|error| error.to_string())?;
+    Ok(json!({ "success": true }))
+}
+
+#[tauri::command]
+pub async fn refresh_project_models(
+    state: State<'_, Arc<AppState>>,
+    protocol: String,
+    mapping_id: String,
+) -> Result<Value, String> {
+    match state
+        .project_models_view(&protocol, &mapping_id, true)
+        .await
+    {
+        Ok(view) => Ok(json!({
+            "success": true,
+            "view": serde_json::to_value(view).unwrap_or(Value::Null)
+        })),
+        Err(error) => Ok(error_value(error)),
+    }
+}
+
+#[tauri::command]
+pub async fn add_project_bindings(
+    state: State<'_, Arc<AppState>>,
+    protocol: String,
+    mapping_id: String,
+    paths: Vec<String>,
+) -> Result<Value, String> {
+    match state
+        .add_project_bindings(&protocol, &mapping_id, paths)
+        .await
+    {
+        Ok(()) => Ok(json!({ "success": true })),
+        Err(error) => Ok(error_value(error)),
+    }
+}
+
+#[tauri::command]
+pub async fn remove_project_binding(
+    state: State<'_, Arc<AppState>>,
+    protocol: String,
+    id: String,
+) -> Result<Value, String> {
+    match state.remove_project_binding(&protocol, &id) {
+        Ok(()) => Ok(json!({ "success": true })),
+        Err(error) => Ok(error_value(error)),
+    }
+}
+
+#[tauri::command]
 pub async fn get_proxy_status(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let status = state.proxy_status();
-    Ok(json!({ "success": true, "status": status.status, "port": status.port, "error": status.error }))
+    Ok(
+        json!({ "success": true, "status": status.status, "port": status.port, "error": status.error }),
+    )
 }
 
 #[tauri::command]
@@ -256,7 +391,9 @@ pub async fn start_proxy(state: State<'_, Arc<AppState>>) -> Result<Value, Strin
 pub async fn stop_proxy(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let inner = state.inner().clone();
     let status = inner.stop_proxy().await;
-    Ok(json!({ "success": true, "status": status.status, "port": status.port, "error": status.error }))
+    Ok(
+        json!({ "success": true, "status": status.status, "port": status.port, "error": status.error }),
+    )
 }
 
 #[tauri::command]
@@ -272,7 +409,10 @@ pub async fn restart_proxy(state: State<'_, Arc<AppState>>) -> Result<Value, Str
 }
 
 #[tauri::command]
-pub async fn fetch_provider_models(state: State<'_, Arc<AppState>>, payload: Value) -> Result<Value, String> {
+pub async fn fetch_provider_models(
+    state: State<'_, Arc<AppState>>,
+    payload: Value,
+) -> Result<Value, String> {
     let client = state.http_client.clone();
     Ok(fetch_upstream_models(&client, &payload).await)
 }
@@ -283,7 +423,10 @@ pub async fn get_logs(state: State<'_, Arc<AppState>>) -> Result<Value, String> 
 }
 
 #[tauri::command]
-pub async fn get_usage(state: State<'_, Arc<AppState>>, range: Option<Value>) -> Result<Value, String> {
+pub async fn get_usage(
+    state: State<'_, Arc<AppState>>,
+    range: Option<Value>,
+) -> Result<Value, String> {
     let options = range.unwrap_or_else(|| json!({}));
     let usage = state.request_log.usage(&options);
     let mut value = json!({ "success": true });
@@ -324,4 +467,3 @@ pub async fn clear_usage(state: State<'_, Arc<AppState>>) -> Result<Value, Strin
 pub async fn log(level: String, message: String, data: Option<Value>) {
     logger::log(&level, &format!("[Renderer] {message}"), data.as_ref());
 }
-

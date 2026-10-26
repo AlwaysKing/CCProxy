@@ -3,7 +3,8 @@
 use serde_json::{json, Value};
 
 use ccproxy_lib::config::{
-    create_client_token, create_default_config, validate_config, ConfigManager, DEFAULT_PORT,
+    create_client_token, create_default_config, validate_config, ConfigManager, CONFIG_VERSION,
+    DEFAULT_PORT,
 };
 
 use common::{config_from, TempDir};
@@ -36,6 +37,162 @@ fn first_run_returns_defaults() {
         .map(|item| item.id.as_str())
         .collect();
     assert_eq!(ids, vec!["anthropic", "openai_chat", "openai_responses"]);
+}
+
+#[test]
+fn legacy_project_models_expand_to_flat_bindings_and_keep_offline_paths() {
+    let result = validate_config(&json!({
+        "version": 5,
+        "settings": {
+            "projectModelProjects": [{
+                "id": "p1",
+                "path": "/tmp/ccproxy-project-that-does-not-need-to-exist",
+                "codexModel": "codex-model",
+                "claudeModel": "claude-model",
+                "manual": true,
+                "hidden": false
+            }]
+        },
+        "providers": [{
+            "id": "p1",
+            "name": "provider",
+            "enabled": true,
+            "baseUrl": "https://example.com",
+            "token": "sk-test",
+            "modelGroups": [
+                { "id": "g-codex", "apiFormat": "openai", "models": [{ "name": "real-codex" }] },
+                { "id": "g-claude", "apiFormat": "anthropic", "models": [{ "name": "real-claude" }] }
+            ]
+        }],
+        "protocols": [
+            {
+                "id": "openai_responses",
+                "name": "OpenAI Responses",
+                "enabled": true,
+                "mappings": [{
+                    "id": "m-codex",
+                    "enabled": true,
+                    "clientModel": "codex-model",
+                    "providerId": "p1",
+                    "modelGroupId": "g-codex",
+                    "upstreamProtocol": "openai_responses",
+                    "realModel": "real-codex"
+                }]
+            },
+            {
+                "id": "anthropic",
+                "name": "Anthropic",
+                "enabled": true,
+                "mappings": [{
+                    "id": "m-claude",
+                    "enabled": true,
+                    "clientModel": "claude-model",
+                    "providerId": "p1",
+                    "modelGroupId": "g-claude",
+                    "upstreamProtocol": "anthropic",
+                    "realModel": "real-claude"
+                }]
+            }
+        ]
+    }));
+    let config = result.config.unwrap();
+    assert_eq!(config.version, 6);
+    assert_eq!(config.settings.project_model_bindings.len(), 2);
+    assert_eq!(
+        config.settings.project_model_bindings[0].path,
+        "/tmp/ccproxy-project-that-does-not-need-to-exist"
+    );
+    assert_eq!(config.settings.project_model_bindings[0].client, "codex");
+    assert_eq!(
+        config.settings.project_model_bindings[0].mapping_id,
+        "m-codex"
+    );
+    assert_eq!(config.settings.project_model_bindings[1].client, "claude");
+    assert_eq!(
+        config.settings.project_model_bindings[1].mapping_id,
+        "m-claude"
+    );
+}
+
+#[test]
+fn project_model_paths_and_ids_are_normalized() {
+    let result = validate_config(&json!({
+        "settings": {
+            "projectModelBindings": [
+                {
+                    "id": "same",
+                    "path": "/tmp/project-a",
+                    "client": "codex",
+                    "mappingId": "m1"
+                },
+                {
+                    "id": "same",
+                    "path": "/tmp/project-b",
+                    "client": "claude",
+                    "mappingId": "m2"
+                },
+                {
+                    "id": "duplicate-path",
+                    "path": "/tmp/project-a/",
+                    "client": "codex",
+                    "mappingId": "m3"
+                }
+            ]
+        },
+        "providers": [{
+            "id": "p1",
+            "name": "provider",
+            "enabled": true,
+            "baseUrl": "https://example.com",
+            "token": "sk-test",
+            "modelGroups": [
+                { "id": "g-codex", "apiFormat": "openai", "models": [{ "name": "real-codex" }] },
+                { "id": "g-claude", "apiFormat": "anthropic", "models": [{ "name": "real-claude" }] }
+            ]
+        }],
+        "protocols": [
+            {
+                "id": "openai_responses",
+                "name": "OpenAI Responses",
+                "enabled": true,
+                "mappings": [{
+                    "id": "m1", "enabled": true, "clientModel": "codex-a",
+                    "providerId": "p1", "modelGroupId": "g-codex",
+                    "upstreamProtocol": "openai_responses", "realModel": "real-codex"
+                }, {
+                    "id": "m3", "enabled": true, "clientModel": "codex-b",
+                    "providerId": "p1", "modelGroupId": "g-codex",
+                    "upstreamProtocol": "openai_responses", "realModel": "real-codex"
+                }]
+            },
+            {
+                "id": "anthropic",
+                "name": "Anthropic",
+                "enabled": true,
+                "mappings": [{
+                    "id": "m2", "enabled": true, "clientModel": "claude-a",
+                    "providerId": "p1", "modelGroupId": "g-claude",
+                    "upstreamProtocol": "anthropic", "realModel": "real-claude"
+                }]
+            }
+        ]
+    }));
+    let config = result.config.unwrap();
+    let bindings = config.settings.project_model_bindings;
+    assert_eq!(bindings.len(), 2);
+    assert_eq!(bindings[0].path, "/tmp/project-a");
+    assert_eq!(bindings[0].client, "codex");
+    assert_eq!(bindings[0].mapping_id, "m1");
+    assert_eq!(bindings[1].path, "/tmp/project-b");
+    assert_ne!(bindings[0].id, bindings[1].id);
+    assert!(result
+        .issues
+        .iter()
+        .any(|issue| issue.contains("重复的项目绑定")));
+    assert!(result
+        .issues
+        .iter()
+        .any(|issue| issue.contains("重复的项目绑定 id")));
 }
 
 #[test]
@@ -250,16 +407,16 @@ fn v2_openai_provider_expands_to_groups_and_keeps_capabilities() {
             }])
         );
     }
+    assert_eq!(config.protocols[1].mappings[0].model_group_id, "g_openai");
+    assert_eq!(config.protocols[2].mappings[0].model_group_id, "g_openai");
     assert_eq!(
-        config.protocols[1].mappings[0].model_group_id,
-        "g_openai"
+        config.protocols[1].mappings[0].upstream_protocol,
+        "openai_chat"
     );
     assert_eq!(
-        config.protocols[2].mappings[0].model_group_id,
-        "g_openai"
+        config.protocols[2].mappings[0].upstream_protocol,
+        "openai_responses"
     );
-    assert_eq!(config.protocols[1].mappings[0].upstream_protocol, "openai_chat");
-    assert_eq!(config.protocols[2].mappings[0].upstream_protocol, "openai_responses");
 }
 
 #[test]
@@ -484,10 +641,7 @@ fn legacy_config_hoists_providers_and_splits_openai() {
                 .collect()
         })
         .collect();
-    assert_eq!(
-        formats,
-        vec![vec!["anthropic"], vec!["openai"]]
-    );
+    assert_eq!(formats, vec![vec!["anthropic"], vec!["openai"]]);
     assert_eq!(config.providers[1].model_groups.len(), 1);
 
     // 迁移要有交代，但不能把老的 openai 条目报成「不支持的协议」
@@ -537,10 +691,7 @@ fn new_shape_providers_are_read_from_the_top_level() {
     let config = result.config.unwrap();
     assert_eq!(config.providers.len(), 1);
     assert_eq!(config.providers[0].model_groups.len(), 1);
-    assert_eq!(
-        config.providers[0].model_groups[0].api_format,
-        "openai"
-    );
+    assert_eq!(config.providers[0].model_groups[0].api_format, "openai");
     assert_eq!(config.protocols[2].mappings.len(), 1);
     // 新结构下不该出现迁移提示
     assert!(!result
@@ -614,10 +765,7 @@ fn same_id_with_different_inferred_format_is_not_merged() {
                 .collect()
         })
         .collect();
-    assert_eq!(
-        formats,
-        vec![vec!["anthropic"], vec!["openai"]]
-    );
+    assert_eq!(formats, vec![vec!["anthropic"], vec!["openai"]]);
 }
 
 #[test]
@@ -673,10 +821,10 @@ fn loading_a_legacy_file_backs_it_up_and_writes_the_new_shape() {
         legacy_text
     );
 
-    // 落盘的是新结构：供应商在顶层、协议下没有 providers、版本号升到 5，其余设置原样保留
+    // 落盘的是新结构：供应商在顶层、协议下没有 providers、版本号升到当前版本，其余设置原样保留
     let saved: Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
-    assert_eq!(saved["version"], json!(5));
+    assert_eq!(saved["version"], json!(CONFIG_VERSION));
     assert_eq!(
         saved["providers"][0]["modelGroups"][0]["apiFormat"],
         json!("anthropic")
@@ -740,11 +888,21 @@ fn loading_a_v2_file_backs_up_and_expands_models_without_losing_abilities() {
         assert_eq!(group.models[0].context_window, Some(400000));
         assert_eq!(group.models[0].reasoning, Some(true));
     }
-    assert_eq!(std::fs::read_to_string(dir.join("app.json.v2.bak")).unwrap(), legacy_text);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("app.json.v2.bak")).unwrap(),
+        legacy_text
+    );
 
-    let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
-    assert_eq!(saved["version"], json!(5));
-    assert_eq!(saved["providers"][0]["modelGroups"].as_array().unwrap().len(), 1);
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
+    assert_eq!(saved["version"], json!(CONFIG_VERSION));
+    assert_eq!(
+        saved["providers"][0]["modelGroups"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(saved["providers"][0].get("apiFormat").is_none());
 }
 
@@ -794,22 +952,51 @@ fn loading_intermediate_v3_promotes_group_address_and_token() {
 
     let loaded = manager.load();
     assert!(!loaded.recovered);
-    assert_eq!(loaded.config.providers[0].base_url, "https://shared.example.com/v1");
+    assert_eq!(
+        loaded.config.providers[0].base_url,
+        "https://shared.example.com/v1"
+    );
     assert_eq!(loaded.config.providers[0].token, "sk-shared");
     assert_eq!(loaded.config.providers[0].model_groups.len(), 1);
-    assert_eq!(loaded.config.providers[0].model_groups[0].api_format, "openai");
+    assert_eq!(
+        loaded.config.providers[0].model_groups[0].api_format,
+        "openai"
+    );
     assert_eq!(loaded.config.providers[0].model_groups[0].models.len(), 2);
-    assert_eq!(loaded.config.providers[0].model_groups[0].models[0].context_window, Some(400000));
-    assert_eq!(loaded.config.providers[0].model_groups[0].models[1].reasoning, Some(true));
-    assert_eq!(loaded.config.protocols[2].mappings[0].model_group_id, "g_openai");
-    assert_eq!(loaded.config.protocols[2].mappings[0].upstream_protocol, "openai_responses");
-    assert_eq!(std::fs::read_to_string(dir.join("app.json.v3.bak")).unwrap(), original);
+    assert_eq!(
+        loaded.config.providers[0].model_groups[0].models[0].context_window,
+        Some(400000)
+    );
+    assert_eq!(
+        loaded.config.providers[0].model_groups[0].models[1].reasoning,
+        Some(true)
+    );
+    assert_eq!(
+        loaded.config.protocols[2].mappings[0].model_group_id,
+        "g_openai"
+    );
+    assert_eq!(
+        loaded.config.protocols[2].mappings[0].upstream_protocol,
+        "openai_responses"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("app.json.v3.bak")).unwrap(),
+        original
+    );
 
-    let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
-    assert_eq!(saved["providers"][0]["baseUrl"], json!("https://shared.example.com/v1"));
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
+    assert_eq!(
+        saved["providers"][0]["baseUrl"],
+        json!("https://shared.example.com/v1")
+    );
     assert_eq!(saved["providers"][0]["token"], json!("sk-shared"));
-    assert!(saved["providers"][0]["modelGroups"][0].get("baseUrl").is_none());
-    assert!(saved["providers"][0]["modelGroups"][0].get("token").is_none());
+    assert!(saved["providers"][0]["modelGroups"][0]
+        .get("baseUrl")
+        .is_none());
+    assert!(saved["providers"][0]["modelGroups"][0]
+        .get("token")
+        .is_none());
 }
 
 #[test]
@@ -852,7 +1039,14 @@ fn loading_v4_sorts_mappings_into_legacy_priority_order() {
     // wild-a / wild-b 等长，保持原相对顺序（稳定排序）
     assert_eq!(
         ids,
-        vec!["exact", "wild-long", "wild-b", "wild-a", "wild-short", "fallback"]
+        vec![
+            "exact",
+            "wild-long",
+            "wild-b",
+            "wild-a",
+            "wild-short",
+            "fallback"
+        ]
     );
     assert!(loaded
         .issues
@@ -865,7 +1059,7 @@ fn loading_v4_sorts_mappings_into_legacy_priority_order() {
 
     let saved: Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("app.json")).unwrap()).unwrap();
-    assert_eq!(saved["version"], json!(5));
+    assert_eq!(saved["version"], json!(CONFIG_VERSION));
     // 落盘顺序也要是整理后的顺序，不能每次加载都重排
     let saved_ids: Vec<&str> = saved["protocols"][0]["mappings"]
         .as_array()

@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 // v4：供应商仍是全局池，地址与 token 挂在供应商上；模型列表只分 Claude / OpenAI 两类，
 // 映射明确记录上游协议，路由直接按它决定透传或转换。
 // v5：映射表顺序即匹配优先级；低版本配置升级时按旧优先级稳定排序一次，命中结果不变。
-pub const CONFIG_VERSION: u32 = 5;
+pub const CONFIG_VERSION: u32 = 6;
 // 从这一版起列表顺序决定匹配优先级，低于它的配置需要按旧语义整理一次
 const MAPPING_ORDER_VERSION: u32 = 5;
 pub const DEFAULT_PORT: u16 = 18888;
@@ -52,6 +52,15 @@ pub struct ClientDir {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectModelBinding {
+    pub id: String,
+    pub path: String,
+    pub client: String,
+    pub mapping_id: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub port: u16,
     pub launch_at_login: bool,
@@ -59,6 +68,7 @@ pub struct Settings {
     pub usage_enabled: bool,
     pub client_dirs: Vec<ClientDir>,
     pub client_token: String,
+    pub project_model_bindings: Vec<ProjectModelBinding>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -144,6 +154,7 @@ pub fn create_default_config() -> AppConfig {
             usage_enabled: true,
             client_dirs: Vec::new(),
             client_token: String::new(),
+            project_model_bindings: Vec::new(),
         },
         protocols: SUPPORTED_PROTOCOLS
             .iter()
@@ -394,7 +405,11 @@ fn merge_model(existing: &mut Model, incoming: &Model) {
 
 fn merge_model_group(existing: &mut ModelGroup, incoming: ModelGroup) {
     for model in incoming.models {
-        if let Some(kept) = existing.models.iter_mut().find(|item| item.name == model.name) {
+        if let Some(kept) = existing
+            .models
+            .iter_mut()
+            .find(|item| item.name == model.name)
+        {
             merge_model(kept, &model);
         } else {
             existing.models.push(model);
@@ -645,13 +660,22 @@ fn normalize_mapping(
             .iter()
             .find(|item| item.api_format == protocol_model_format(upstream_protocol))
     } else if !requested_group.is_empty() {
-        provider.model_groups.iter().find(|item| item.id == requested_group).or_else(|| {
-            (requested_group.contains("openai")
-                || requested_group.contains("chat")
-                || requested_group.contains("responses"))
-                .then(|| provider.model_groups.iter().find(|item| item.api_format == "openai"))
+        provider
+            .model_groups
+            .iter()
+            .find(|item| item.id == requested_group)
+            .or_else(|| {
+                (requested_group.contains("openai")
+                    || requested_group.contains("chat")
+                    || requested_group.contains("responses"))
+                .then(|| {
+                    provider
+                        .model_groups
+                        .iter()
+                        .find(|item| item.api_format == "openai")
+                })
                 .flatten()
-        })
+            })
     } else {
         provider
             .model_groups
@@ -816,6 +840,190 @@ fn normalize_client_dirs(raw: Option<&Value>, issues: &mut Vec<String>) -> Vec<C
     dirs
 }
 
+fn normalize_project_path(raw: &str) -> Option<String> {
+    let path = Path::new(raw.trim());
+    if !path.is_absolute() {
+        return None;
+    }
+    let normalized: PathBuf = path.components().collect();
+    Some(normalized.to_string_lossy().to_string())
+}
+
+fn normalize_project_model(
+    raw: Option<&Value>,
+    binding_id: &str,
+    issues: &mut Vec<String>,
+) -> Option<String> {
+    let raw = raw?;
+    let Some(value) = raw.as_str() else {
+        issues.push(format!("项目绑定 {binding_id} 的 model 不是字符串，已丢弃"));
+        return None;
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.contains('*') {
+        issues.push(format!(
+            "项目绑定 {binding_id} 的 model 不能是通配符，已丢弃"
+        ));
+        return None;
+    }
+    Some(value.to_string())
+}
+
+// 项目路径只做绝对路径与重复分隔符的纯字符串归一化，不访问文件系统：
+// 项目临时离线不能让一次无关保存把绑定删掉。存在性在发现、添加和同步阶段检查。
+fn normalize_project_bindings(
+    settings: &Value,
+    protocols: &[Protocol],
+    issues: &mut Vec<String>,
+) -> Vec<ProjectModelBinding> {
+    let current = settings.get("projectModelBindings");
+    let legacy = settings.get("projectModelProjects");
+    let Some(raw) = current.or(legacy) else {
+        return Vec::new();
+    };
+    if raw.is_null() {
+        return Vec::new();
+    }
+    let Some(items) = raw.as_array() else {
+        issues.push("settings.projectModelBindings 不是数组，已重置为空".to_string());
+        return Vec::new();
+    };
+
+    let mut bindings: Vec<ProjectModelBinding> = Vec::new();
+    for item in items {
+        if !is_plain_object(item) {
+            issues.push("settings.projectModelBindings 下存在非法条目，已丢弃".to_string());
+            continue;
+        }
+        let raw_path = item.get("path").and_then(as_str).unwrap_or("");
+        let Some(path) = normalize_project_path(raw_path) else {
+            issues.push(format!(
+                "项目目录 path 必须是绝对路径（{}），已丢弃",
+                json_text(&item.get("path").cloned().unwrap_or(Value::Null))
+            ));
+            continue;
+        };
+
+        let is_legacy = current.is_none();
+        let candidates: Vec<(&str, Option<&Value>, Option<&str>)> = if is_legacy {
+            vec![
+                (
+                    "codex",
+                    item.get("codexModel"),
+                    item.get("mappingId").and_then(as_str),
+                ),
+                (
+                    "claude",
+                    item.get("claudeModel"),
+                    item.get("mappingId").and_then(as_str),
+                ),
+            ]
+        } else {
+            let client = item.get("client").and_then(as_str).unwrap_or("");
+            vec![(client, None, item.get("mappingId").and_then(as_str))]
+        };
+        for (client, legacy_model, raw_mapping_id) in candidates {
+            if client != "codex" && client != "claude" {
+                issues.push(format!(
+                    "项目绑定 {path} 的 client 非法（{client}），已丢弃"
+                ));
+                continue;
+            }
+            if bindings
+                .iter()
+                .any(|kept| kept.path == path && kept.client == client)
+            {
+                issues.push(format!("存在重复的项目绑定 {path} ({client})，已丢弃后者"));
+                continue;
+            }
+            let raw_id = item.get("id").and_then(as_str).unwrap_or("").trim();
+            let mut id = if raw_id.is_empty() {
+                create_config_id("b")
+            } else if is_legacy {
+                create_config_id("b")
+            } else {
+                raw_id.to_string()
+            };
+            if bindings.iter().any(|kept| kept.id == id) {
+                issues.push(format!("存在重复的项目绑定 id {id}，已重新生成"));
+                loop {
+                    let candidate = create_config_id("b");
+                    if !bindings.iter().any(|kept| kept.id == candidate) {
+                        id = candidate;
+                        break;
+                    }
+                }
+            }
+            let mapping_id = if let Some(mapping_id) = raw_mapping_id
+                .map(str::trim)
+                .filter(|mapping_id| !mapping_id.is_empty())
+            {
+                mapping_id.to_string()
+            } else if let Some(raw_model) = legacy_model {
+                let Some(model) = normalize_project_model(Some(raw_model), &id, issues) else {
+                    continue;
+                };
+                let protocol_id = if client == "codex" {
+                    "openai_responses"
+                } else {
+                    "anthropic"
+                };
+                let Some(mapping_id) = protocols
+                    .iter()
+                    .find(|protocol| protocol.id == protocol_id)
+                    .and_then(|protocol| {
+                        protocol.mappings.iter().find(|mapping| {
+                            mapping.client_model == model && !mapping.client_model.contains('*')
+                        })
+                    })
+                    .map(|mapping| mapping.id.clone())
+                else {
+                    issues.push(format!(
+                        "旧项目绑定 {path} 的模型 {model} 找不到精确映射，已丢弃"
+                    ));
+                    continue;
+                };
+                mapping_id
+            } else {
+                issues.push(format!("项目绑定 {path} 缺少 mappingId，已丢弃"));
+                continue;
+            };
+            let protocol_id = if client == "codex" {
+                "openai_responses"
+            } else {
+                "anthropic"
+            };
+            let mapping_exists = protocols
+                .iter()
+                .find(|protocol| protocol.id == protocol_id)
+                .is_some_and(|protocol| {
+                    protocol.mappings.iter().any(|mapping| {
+                        mapping.id == mapping_id && !mapping.client_model.contains('*')
+                    })
+                });
+            if !mapping_exists {
+                issues.push(format!(
+                    "项目绑定 {path} 的 mappingId {mapping_id} 不存在或不是精确映射，已丢弃"
+                ));
+                continue;
+            }
+            bindings.push(ProjectModelBinding {
+                id,
+                path: path.clone(),
+                client: client.to_string(),
+                mapping_id,
+            });
+        }
+    }
+    if current.is_none() && !bindings.is_empty() {
+        issues.push("项目模型绑定已从旧结构升级为按客户端拆分".to_string());
+    }
+    bindings
+}
+
 // JS 的 Number() 语义：数字原样、字符串按数值解析（空串是 0）、布尔转 0/1、null 是 0
 fn to_number(value: &Value) -> Option<f64> {
     match value {
@@ -843,9 +1051,10 @@ fn same_provider(left: &Provider, right: &Provider) -> bool {
         && left.token == right.token
         && left.model_groups.len() == right.model_groups.len()
         && left.model_groups.iter().all(|left_group| {
-            right.model_groups.iter().any(|right_group| {
-                left_group.api_format == right_group.api_format
-            })
+            right
+                .model_groups
+                .iter()
+                .any(|right_group| left_group.api_format == right_group.api_format)
         })
 }
 
@@ -1142,6 +1351,7 @@ pub fn validate_config(raw: &Value) -> Validated {
                 .unwrap_or("")
                 .trim()
                 .to_string(),
+            project_model_bindings: normalize_project_bindings(settings, &protocols, &mut issues),
         },
         providers,
         protocols,
@@ -1246,8 +1456,10 @@ impl ConfigManager {
             Err(error) => format!("复制原文件失败：{error}"),
         };
         let encoded = serde_json::to_value(config).unwrap_or(Value::Null);
-        // v4 的结构本身没变，只是映射顺序开始参与路由；更老的版本才是结构升级
-        let note = if version >= 4 {
+        // v5 只新增项目模型设置，没有重排映射；v4 才是映射顺序迁移，更老的版本是结构升级
+        let note = if version == 5 {
+            "已把旧版配置升级到 v6（新增项目默认模型设置，映射表保持原顺序）"
+        } else if version >= 4 {
             "已把旧版配置升级为当前版本（映射表已按原优先级整理，之后可用拖拽调整）"
         } else {
             "已把旧版配置升级为新结构（供应商保持全局池、模型列表按 Claude / OpenAI 归类）"
