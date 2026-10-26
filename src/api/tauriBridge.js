@@ -57,6 +57,16 @@ export function installTauriBridge() {
     addClientDir: (dirPath) => invoke('add_client_dir', { path: dirPath }),
     applyClientDir: (dirPath) => invoke('apply_client_dir', { path: dirPath }),
     removeClientDir: (dirId) => invoke('remove_client_dir', { id: dirId }),
+    getProjectModels: () => invoke('get_project_models'),
+    refreshProjectModels: () => invoke('refresh_project_models'),
+    setProjectSyncEnabled: (enabled) => invoke('set_project_sync_enabled', { enabled }),
+    pickProjectDir: () => invoke('pick_project_dir'),
+    addProjectDir: (dirPath) => invoke('add_project_dir', { path: dirPath }),
+    setProjectModel: (dirPath, client, model) =>
+      invoke('set_project_model', { path: dirPath, client, model }),
+    hideProject: (dirPath) => invoke('hide_project', { path: dirPath }),
+    unhideProject: (dirPath) => invoke('unhide_project', { path: dirPath }),
+    removeProject: (dirPath) => invoke('remove_project', { path: dirPath }),
     getLogs: () => invoke('get_logs'),
     getUsage: (range) => invoke('get_usage', { range }),
     getStorageStats: () => invoke('get_storage_stats'),
@@ -69,6 +79,7 @@ export function installTauriBridge() {
 
   window.electronEvents = {
     onConfigChanged: (callback) => subscribe('config-changed', callback),
+    onProjectModelsChanged: (callback) => subscribe('project-models-changed', callback),
     onProxyStatusChanged: (callback) => subscribe('proxy-status-changed', callback),
     onLogAppended: (callback) => subscribe('log-appended', callback)
   }

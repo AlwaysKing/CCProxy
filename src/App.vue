@@ -5,16 +5,19 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
 import { useProxyStore } from '@/stores/useProxyStore'
 import { useClientDirsStore } from '@/stores/useClientDirsStore'
+import { useProjectModelsStore } from '@/stores/useProjectModelsStore'
 import { Toggle } from '@/components/base'
 import { logger } from '@/utils/logger'
 import ProvidersView from '@/views/providers/ProvidersView.vue'
 import LogsView from '@/views/logs/LogsView.vue'
 import UsageView from '@/views/usage/UsageView.vue'
 import SettingsView from '@/views/settings/SettingsView.vue'
+import ProjectsView from '@/views/projects/ProjectsView.vue'
 
 // 页面入口。模型映射页内部再切换客户端协议。
 const VIEW_ITEMS = [
   { key: 'providers', label: '模型映射' },
+  { key: 'projects', label: '项目模型' },
   { key: 'logs', label: '请求日志' },
   { key: 'usage', label: '用量统计' },
   { key: 'settings', label: '设置' }
@@ -23,6 +26,7 @@ const VIEW_ITEMS = [
 const configStore = useConfigStore()
 const proxyStore = useProxyStore()
 const clientDirsStore = useClientDirsStore()
+const projectModelsStore = useProjectModelsStore()
 
 const activeView = ref('providers')
 const activeProtocolId = ref(null)
@@ -47,10 +51,12 @@ let unsubscribes = []
 onMounted(async () => {
   unsubscribes.push(window.electronEvents.onConfigChanged((payload) => configStore.applyState(payload)))
   unsubscribes.push(window.electronEvents.onProxyStatusChanged((payload) => proxyStore.apply(payload)))
+  unsubscribes.push(window.electronEvents.onProjectModelsChanged(() => projectModelsStore.reload()))
   await Promise.all([configStore.init(), proxyStore.init()])
   // 启动就扫一遍客户端目录：有和 CCProxy 不一致的，顶栏常驻一个感叹号提醒，
   // 点它去设置页处理。配置/代理先就位，检查的口径（端口、token）才是最终的
   clientDirsStore.init()
+  projectModelsStore.reload()
   // 界面起来、IPC 通了的证据落一条日志：窗口白屏或命令没注册时，翻 app.log 就知道卡在哪一步
   logger.info('[UI] 界面已就绪', {
     protocols: configStore.protocols.map((protocol) => protocol.id),
@@ -118,6 +124,7 @@ onUnmounted(() => {
 
     <main class="app-main">
       <ProvidersView v-if="activeView === 'providers'" v-model:protocol-id="activeProtocolId" />
+      <ProjectsView v-else-if="activeView === 'projects'" />
       <LogsView v-else-if="activeView === 'logs'" />
       <UsageView v-else-if="activeView === 'usage'" />
       <SettingsView v-else-if="activeView === 'settings'" />
