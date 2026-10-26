@@ -7,6 +7,7 @@ pub mod check;
 pub mod daemon;
 pub mod dirs;
 pub mod json;
+pub mod project_models;
 pub mod toml;
 pub mod write;
 
