@@ -50,7 +50,11 @@ pub fn match_mapping(mapping: &Mapping, client_model: &str) -> bool {
     false
 }
 
-pub fn resolve_routing(config: &AppConfig, protocol_id: &str, client_model: &str) -> Result<Route, RouteError> {
+pub fn resolve_routing(
+    config: &AppConfig,
+    protocol_id: &str,
+    client_model: &str,
+) -> Result<Route, RouteError> {
     let Some(protocol) = config.protocol(protocol_id) else {
         return Err(RouteError {
             status: 404,
@@ -73,20 +77,30 @@ pub fn resolve_routing(config: &AppConfig, protocol_id: &str, client_model: &str
         if !mapping.enabled {
             continue;
         }
-        let Some(provider) = config.providers.iter().find(|item| item.id == mapping.provider_id) else {
+        let Some(provider) = config
+            .providers
+            .iter()
+            .find(|item| item.id == mapping.provider_id)
+        else {
             continue;
         };
         if !provider.enabled {
             continue;
         }
-        let Some(group) = provider.model_groups.iter().find(|item| item.id == mapping.model_group_id) else {
+        let Some(group) = provider
+            .model_groups
+            .iter()
+            .find(|item| item.id == mapping.model_group_id)
+        else {
             continue;
         };
         usable.push((mapping, provider, group));
     }
 
     // 按映射表顺序匹配，首条命中生效。matchKind 由命中的规则形态推导，供请求日志展示
-    let hit = usable.iter().find(|(mapping, _, _)| match_mapping(mapping, client_model));
+    let hit = usable
+        .iter()
+        .find(|(mapping, _, _)| match_mapping(mapping, client_model));
     let match_kind = hit.map(|(mapping, _, _)| {
         let pattern = mapping.client_model.as_str();
         if pattern == "*" {
@@ -99,7 +113,11 @@ pub fn resolve_routing(config: &AppConfig, protocol_id: &str, client_model: &str
     });
 
     let Some((mapping, provider, group)) = hit else {
-        let label = if client_model.is_empty() { "(空)" } else { client_model };
+        let label = if client_model.is_empty() {
+            "(空)"
+        } else {
+            client_model
+        };
         return Err(RouteError {
             status: 404,
             code: "mapping_not_found".to_string(),
@@ -149,6 +167,8 @@ mod tests {
                 usage_enabled: true,
                 client_dirs: Vec::new(),
                 client_token: String::new(),
+                project_model_sync_enabled: false,
+                project_model_projects: Vec::new(),
             },
             providers: vec![Provider {
                 id: "p1".to_string(),
@@ -188,7 +208,10 @@ mod tests {
             mapping("m1", "claude-*", "real-wildcard"),
             mapping("m2", "claude-3", "real-exact"),
         ]);
-        assert_eq!(resolve(&config, "claude-3"), ("real-wildcard".to_string(), "wildcard".to_string()));
+        assert_eq!(
+            resolve(&config, "claude-3"),
+            ("real-wildcard".to_string(), "wildcard".to_string())
+        );
     }
 
     #[test]
@@ -197,8 +220,14 @@ mod tests {
             mapping("m1", "claude-3", "real-exact"),
             mapping("m2", "claude-*", "real-wildcard"),
         ]);
-        assert_eq!(resolve(&config, "claude-3"), ("real-exact".to_string(), "exact".to_string()));
-        assert_eq!(resolve(&config, "claude-4"), ("real-wildcard".to_string(), "wildcard".to_string()));
+        assert_eq!(
+            resolve(&config, "claude-3"),
+            ("real-exact".to_string(), "exact".to_string())
+        );
+        assert_eq!(
+            resolve(&config, "claude-4"),
+            ("real-wildcard".to_string(), "wildcard".to_string())
+        );
     }
 
     #[test]
@@ -207,7 +236,10 @@ mod tests {
             mapping("m1", "*", "real-fallback"),
             mapping("m2", "claude-3", "real-exact"),
         ]);
-        assert_eq!(resolve(&config, "claude-3"), ("real-fallback".to_string(), "fallback".to_string()));
+        assert_eq!(
+            resolve(&config, "claude-3"),
+            ("real-fallback".to_string(), "fallback".to_string())
+        );
     }
 
     #[test]
@@ -215,6 +247,9 @@ mod tests {
         let mut disabled = mapping("m1", "claude-*", "real-wildcard");
         disabled.enabled = false;
         let config = config_with(vec![disabled, mapping("m2", "claude-3", "real-exact")]);
-        assert_eq!(resolve(&config, "claude-3"), ("real-exact".to_string(), "exact".to_string()));
+        assert_eq!(
+            resolve(&config, "claude-3"),
+            ("real-exact".to_string(), "exact".to_string())
+        );
     }
 }
