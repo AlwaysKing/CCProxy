@@ -194,6 +194,49 @@ fn inspect_reports_reasoning_levels_when_ccproxy_has_none() {
 }
 
 #[test]
+fn cn_models_cap_windows_at_890k() {
+    let config = config_from(json!({
+        "protocols": [{
+            "id": "openai", "name": "OpenAI", "enabled": true,
+            "providers": [{ "id": "p1", "enabled": true, "baseUrl": "http://a", "models": [
+                { "name": "cn:real", "contextWindow": 1024000, "maxContextWindow": 1048576 },
+                { "name": "real", "contextWindow": 1024000, "maxContextWindow": 1048576 },
+                { "name": "small", "contextWindow": 200000, "maxContextWindow": 262144 }
+            ] }],
+            "mappings": [
+                { "id": "m1", "clientModel": "cn:client", "providerId": "p1", "realModel": "cn:real", "enabled": true },
+                // 客户端名不带 cn: 就按配置原样写，即使真实模型是 cn: 线路
+                { "id": "m2", "clientModel": "client", "providerId": "p1", "realModel": "real", "enabled": true },
+                // 配得比 890K 小就按配置写，不反向抬高
+                { "id": "m3", "clientModel": "cn:small", "providerId": "p1", "realModel": "small", "enabled": true }
+            ]
+        }]
+    }));
+    let entries = expected_catalog_entries(config.protocol("openai_responses"), &config.providers);
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].context_window, Some(911360));
+    assert_eq!(entries[0].max_context_window, Some(911360));
+    assert_eq!(entries[1].context_window, Some(1024000));
+    assert_eq!(entries[1].max_context_window, Some(1048576));
+    assert_eq!(entries[2].context_window, Some(200000));
+    assert_eq!(entries[2].max_context_window, Some(262144));
+}
+
+#[test]
+fn cn_models_without_windows_stay_unconfigured() {
+    let config = config_from(json!({
+        "protocols": [{
+            "id": "openai", "name": "OpenAI", "enabled": true,
+            "providers": [{ "id": "p1", "enabled": true, "baseUrl": "http://a", "models": [{ "name": "cn:real" }] }],
+            "mappings": [{ "id": "m1", "clientModel": "cn:client", "providerId": "p1", "realModel": "cn:real", "enabled": true }]
+        }]
+    }));
+    let entries = expected_catalog_entries(config.protocol("openai_responses"), &config.providers);
+    assert_eq!(entries[0].context_window, None);
+    assert_eq!(entries[0].max_context_window, None);
+}
+
+#[test]
 fn inspect_ignores_capabilities_ccproxy_did_not_configure() {
     let result = inspect_catalog(
         &catalog_text(vec![make_entry("client-a", json!({}))]),

@@ -59,6 +59,20 @@ fn default_reasoning_levels() -> Value {
 
 const DEFAULT_REASONING_LEVEL: &str = "high";
 
+// cn: 开头的模型（国内线路）上游标称 1M 窗口，实际会先被限流/计费掐断，
+// codex 按 1M 估算上下文会过早触发压缩失败。清单里这类模型的窗口一律封顶到 890K
+const CN_MODEL_PREFIX: &str = "cn:";
+const CN_CONTEXT_WINDOW_CAP: u64 = 890 * 1024;
+
+fn is_cn_model(name: &str) -> bool {
+    name.starts_with(CN_MODEL_PREFIX)
+}
+
+// 只压上限：配得比 890K 小就按配置写，不反向抬高
+fn cap_window(name: &str, window: Option<u64>) -> Option<u64> {
+    window.map(|value| if is_cn_model(name) { value.min(CN_CONTEXT_WINDOW_CAP) } else { value })
+}
+
 pub fn catalog_file_path(dir_path: &str) -> String {
     crate::clients::dirs::resolve_path(dir_path, CATALOG_FILE)
 }
@@ -111,8 +125,9 @@ pub fn expected_catalog_entries(protocol: Option<&Protocol>, providers: &[Provid
         let model = group.models.iter().find(|item| item.name == mapping.real_model);
         entries.push(ExpectedEntry {
             name: mapping.client_model.clone(),
-            context_window: model.and_then(|item| item.context_window),
-            max_context_window: model.and_then(|item| item.max_context_window),
+            // 窗口按「客户端看到的模型名」判定 cn:，再看映射指向的真实模型配了多少
+            context_window: cap_window(&mapping.client_model, model.and_then(|item| item.context_window)),
+            max_context_window: cap_window(&mapping.client_model, model.and_then(|item| item.max_context_window)),
             input_modalities: model.and_then(|item| item.input_modalities.clone()),
             reasoning: model.and_then(|item| item.reasoning).unwrap_or(false),
         });
