@@ -85,7 +85,7 @@ async fn fetch_models_parses_dedupes_and_injects_anthropic_auth() {
 }
 
 #[tokio::test]
-async fn fetch_models_uses_bearer_and_dedupes_version_segment() {
+async fn fetch_models_openai_chat_uses_bearer_and_standard_catalog_only() {
     let captured = sink();
     let (port, stop) = mock(
         captured.clone(),
@@ -97,21 +97,15 @@ async fn fetch_models_uses_bearer_and_dedupes_version_segment() {
     let client = reqwest::Client::new();
     let result = fetch_upstream_models(
         &client,
-        &json!({ "apiFormat": "openai", "baseUrl": format!("http://127.0.0.1:{port}/v1"), "token": "sk-real" }),
+        &json!({ "apiFormat": "openai_chat", "baseUrl": format!("http://127.0.0.1:{port}/v1"), "token": "sk-real" }),
     )
     .await;
     assert_eq!(result["models"], json!(["gpt-4o"]));
 
     let entries = captured.lock().unwrap();
     let urls: Vec<&str> = entries.iter().map(|(url, _)| url.as_str()).collect();
-    assert_eq!(
-        urls,
-        [
-            "/v1/models",
-            &format!("/v1/models?client_version={}", env!("CARGO_PKG_VERSION"))
-        ]
-    );
-    // baseUrl 已带 /v1，两个请求路径里的 /v1 都要去重
+    assert_eq!(urls, ["/v1/models"]);
+    // baseUrl 已带 /v1，请求路径里的 /v1 要去重
     let (_, headers) = &entries[0];
     assert_eq!(headers["authorization"], "Bearer sk-real");
     assert!(headers.get("x-api-key").is_none());
@@ -120,7 +114,7 @@ async fn fetch_models_uses_bearer_and_dedupes_version_segment() {
 }
 
 #[tokio::test]
-async fn fetch_models_openai_group_includes_codex_catalog_models() {
+async fn fetch_models_openai_responses_uses_codex_catalog_only() {
     let captured = sink();
     let captured_for_mock = captured.clone();
     let app = Router::new().fallback(any(move |request: axum::extract::Request| {
@@ -134,14 +128,7 @@ async fn fetch_models_openai_group_includes_codex_catalog_models() {
             if let Ok(mut entries) = sink.lock() {
                 entries.push((url.clone(), request.headers().clone()));
             }
-            let payload = if request.uri().query().is_some() {
-                json!({ "models": [
-                    { "slug": "chat-model" },
-                    { "slug": "codex-only" }
-                ] })
-            } else {
-                json!({ "data": [{ "id": "chat-model" }] })
-            };
+            let payload = json!({ "models": [{ "slug": "codex-only" }, { "slug": "codex-only" }] });
             Response::builder()
                 .status(200)
                 .header("content-type", "application/json")
@@ -154,21 +141,18 @@ async fn fetch_models_openai_group_includes_codex_catalog_models() {
     let client = reqwest::Client::new();
     let result = fetch_upstream_models(
         &client,
-        &json!({ "apiFormat": "openai", "baseUrl": format!("http://127.0.0.1:{port}"), "token": "sk-real" }),
+        &json!({ "apiFormat": "openai_responses", "baseUrl": format!("http://127.0.0.1:{port}"), "token": "sk-real" }),
     )
     .await;
 
     assert_eq!(result["ok"], json!(true));
-    assert_eq!(result["models"], json!(["chat-model", "codex-only"]));
+    assert_eq!(result["models"], json!(["codex-only"]));
 
     let entries = captured.lock().unwrap();
     let urls: Vec<&str> = entries.iter().map(|(url, _)| url.as_str()).collect();
     assert_eq!(
         urls,
-        [
-            "/v1/models",
-            &format!("/v1/models?client_version={}", env!("CARGO_PKG_VERSION"))
-        ]
+        [format!("/v1/models?client_version={}", env!("CARGO_PKG_VERSION"))]
     );
     drop(entries);
     let _ = stop.send(());
@@ -209,7 +193,7 @@ async fn fetch_models_reports_unreachable_upstream_without_throwing() {
     let client = reqwest::Client::new();
 
     // 明确格式连不上时报错，不抛异常；auto 与认不出的格式在发起请求前就拒绝。
-    for api_format in ["anthropic", "openai"] {
+    for api_format in ["anthropic", "openai_chat", "openai_responses"] {
         let result = fetch_upstream_models(
             &client,
             &json!({ "apiFormat": api_format, "baseUrl": "http://127.0.0.1:1", "token": "t" }),
@@ -219,7 +203,7 @@ async fn fetch_models_reports_unreachable_upstream_without_throwing() {
         let error = result["error"].as_str().unwrap();
         assert!(!error.trim().is_empty(), "{api_format} 应该返回错误原因");
     }
-    for api_format in ["auto", "gemini"] {
+    for api_format in ["openai", "auto", "gemini"] {
         let result = fetch_upstream_models(
             &client,
             &json!({ "apiFormat": api_format, "baseUrl": "http://127.0.0.1:1", "token": "t" }),

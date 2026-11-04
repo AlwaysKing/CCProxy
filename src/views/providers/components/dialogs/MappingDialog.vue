@@ -7,6 +7,12 @@ import { computed, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
 import { AppSelect, BaseButton, BaseDialog, BaseInput, FormField } from '@/components/base'
 import { newId } from '@/utils/id'
+import {
+  modelGroupForProtocol,
+  modelOptionsForProtocol,
+  modelSelectGroupsForProtocol,
+  upstreamLabel
+} from './mappingModels.mjs'
 
 const props = defineProps({
   modelValue: {
@@ -39,30 +45,23 @@ const selectedProvider = computed(
   () => configStore.providers.find((provider) => provider.id === form.value.providerId) || null
 )
 
-function formatLabel(apiFormat) {
-  if (apiFormat === 'anthropic') return 'Claude'
-  if (apiFormat === 'openai') return 'OpenAI'
-  return apiFormat
-}
-
 const upstreamOptions = computed(() => {
   const options = []
   if (selectedProvider.value?.modelGroups.some((group) => group.apiFormat === 'anthropic')) {
     options.push({ value: 'anthropic', label: 'Claude / Anthropic Messages' })
   }
-  if (selectedProvider.value?.modelGroups.some((group) => group.apiFormat === 'openai')) {
+  if (selectedProvider.value?.modelGroups.some((group) => group.apiFormat === 'openai_chat')) {
     options.push({ value: 'openai_chat', label: 'OpenAI Chat' })
+  }
+  if (selectedProvider.value?.modelGroups.some((group) => group.apiFormat === 'openai_responses')) {
     options.push({ value: 'openai_responses', label: 'OpenAI Responses' })
   }
   return options
 })
-const selectedGroup = computed(
-  () => {
-    if (!form.value.upstreamProtocol) return null
-    const format = form.value.upstreamProtocol === 'anthropic' ? 'anthropic' : 'openai'
-    return selectedProvider.value?.modelGroups.find((group) => group.apiFormat === format) || null
-  }
+const selectedGroup = computed(() =>
+  modelGroupForProtocol(selectedProvider.value, form.value.upstreamProtocol)
 )
+const selectedUpstreamLabel = computed(() => upstreamLabel(form.value.upstreamProtocol))
 
 const conversionSupported = computed(() => {
   const client = props.protocol.id
@@ -95,27 +94,24 @@ function defaultUpstreamProtocol(provider) {
   if (!provider?.modelGroups?.length) return ''
   const hasGroup = (apiFormat) => provider.modelGroups.some((group) => group.apiFormat === apiFormat)
   const client = props.protocol.id
-  if (client === 'anthropic' && hasGroup('anthropic')) return 'anthropic'
-  if ((client === 'openai_chat' || client === 'openai_responses') && hasGroup('openai')) return client
-  return provider.modelGroups[0].apiFormat === 'anthropic' ? 'anthropic' : 'openai_chat'
-}
-
-function groupForUpstream(provider, upstreamProtocol) {
-  const format = upstreamProtocol === 'anthropic' ? 'anthropic' : 'openai'
-  return provider?.modelGroups.find((group) => group.apiFormat === format) || null
+  if (hasGroup(client)) return client
+  return provider.modelGroups[0].apiFormat
 }
 
 const modelOptions = computed(() => {
-  const models = modelNames(selectedGroup.value)
-  const options = models.map((model) => ({ value: model, label: model }))
-  // 编辑回填的旧值可能已不在该供应商的模型列表里（后来改过列表）：保留成一项并标出来，
-  // 不然下拉显示成空的，用户一保存这个值就没了
-  const current = form.value.realModel
-  if (current && !models.includes(current)) {
-    options.unshift({ value: current, label: `${current}（不在该模型组中）` })
-  }
-  return options
+  return modelOptionsForProtocol(
+    selectedProvider.value,
+    form.value.upstreamProtocol,
+    form.value.realModel
+  )
 })
+const modelOptionGroups = computed(() =>
+  modelSelectGroupsForProtocol(
+    selectedProvider.value,
+    form.value.upstreamProtocol,
+    form.value.realModel
+  )
+)
 
 watch(
   () => props.modelValue,
@@ -125,7 +121,7 @@ watch(
     // 新增时供应商和模型默认选第一项；上游协议优先匹配当前客户端协议，少点两次
     const first = configStore.providers[0]
     const firstUpstream = defaultUpstreamProtocol(first)
-    const firstGroup = groupForUpstream(first, firstUpstream)
+    const firstGroup = modelGroupForProtocol(first, firstUpstream)
     form.value = props.mapping
       ? {
           clientModel: props.mapping.clientModel,
@@ -150,17 +146,17 @@ watch(
     const provider = configStore.providers.find((item) => item.id === id)
     const upstream = defaultUpstreamProtocol(provider)
     form.value.upstreamProtocol = upstream
-    const models = modelNames(groupForUpstream(provider, upstream))
+    const models = modelNames(modelGroupForProtocol(provider, upstream))
     if (!models.includes(form.value.realModel)) form.value.realModel = models[0] ?? ''
   }
 )
 
-// 换上游协议后只切换模型列表；OpenAI Chat / Responses 共用同一个模型组。
+// 换上游协议后切换到该协议自己的模型列表。
 watch(
   () => form.value.upstreamProtocol,
   (upstream, prevUpstream) => {
     if (!upstream || !prevUpstream || upstream === prevUpstream) return
-    const group = groupForUpstream(selectedProvider.value, upstream)
+    const group = modelGroupForProtocol(selectedProvider.value, upstream)
     const models = modelNames(group)
     if (!models.includes(form.value.realModel)) form.value.realModel = models[0] ?? ''
   }
@@ -231,8 +227,18 @@ async function onConfirm() {
       {{ conversionMessage }}
     </p>
 
-    <FormField label="真实模型" required>
-      <AppSelect v-model="form.realModel" :options="modelOptions" placeholder="选择模型" full-width />
+    <FormField
+      :label="selectedUpstreamLabel ? `真实模型 · ${selectedUpstreamLabel}` : '真实模型'"
+      required
+      :hint="selectedUpstreamLabel ? `只显示当前上游协议对应模型组中的模型；当前为 ${selectedUpstreamLabel}` : ''"
+    >
+      <AppSelect
+        v-model="form.realModel"
+        :options="modelOptions"
+        :groups="modelOptionGroups"
+        placeholder="选择模型"
+        full-width
+      />
     </FormField>
 
     <p v-if="error" class="dialog-error">{{ error }}</p>

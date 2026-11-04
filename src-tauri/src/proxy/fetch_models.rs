@@ -66,14 +66,14 @@ fn push_models(models: &mut Vec<String>, seen: &mut BTreeSet<String>, page: Vec<
 }
 
 // 拉取上游模型列表。入参 { apiFormat, baseUrl, token }
-// apiFormat 是模型组已经明确下来的上游格式，不再接受 auto 或静默按 OpenAI 兜底。
+// apiFormat 是模型组已经明确下来的上游格式；OpenAI Chat 与 Responses 各走各的发现协议。
 pub async fn fetch_upstream_models(client: &reqwest::Client, payload: &Value) -> Value {
     let api_format = payload.get("apiFormat").and_then(Value::as_str).unwrap_or("");
     let base_url = payload.get("baseUrl").and_then(Value::as_str).unwrap_or("");
     let token = payload.get("token").and_then(Value::as_str).unwrap_or("");
     let protocol_id = match api_format {
         "anthropic" => "anthropic",
-        "openai" | "openai_chat" | "openai_responses" => "openai_chat",
+        "openai_chat" | "openai_responses" => "openai_chat",
         _ => return json!({ "ok": false, "error": "模型组的上游格式无效，请先选择正确的协议" }),
     };
 
@@ -94,7 +94,7 @@ pub async fn fetch_upstream_models(client: &reqwest::Client, payload: &Value) ->
     let mut models: Vec<String> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
 
-    if protocol_id == "anthropic" {
+    if api_format == "anthropic" {
         // Claude Code 的模型发现请求固定带 limit=1000；省略时网关通常按 OpenAI
         // 模型目录处理，会拿到错误协议分支的列表。
         let url = build_upstream_url(base_url, "/v1/models?limit=1000");
@@ -106,44 +106,26 @@ pub async fn fetch_upstream_models(client: &reqwest::Client, payload: &Value) ->
             return json!({ "ok": false, "error": "上游响应里没有可识别的模型列表" });
         };
         push_models(&mut models, &mut seen, page);
+    } else if api_format == "openai_chat" {
+        let url = build_upstream_url(base_url, "/v1/models");
+        let payload = match request_models(client, &url, headers).await {
+            Ok(payload) => payload,
+            Err(error) => return json!({ "ok": false, "error": error }),
+        };
+        let Some(page) = extract_models(&payload, "data", "id") else {
+            return json!({ "ok": false, "error": "OpenAI Chat 响应里没有 data[].id" });
+        };
+        push_models(&mut models, &mut seen, page);
     } else {
-        // OpenAI Chat 与 Codex Responses 共用 CCProxy 的 OpenAI 模型组，
-        // 但模型发现走不同分支。标准目录失败时，Codex 目录仍可独立提供结果。
-        let openai_url = build_upstream_url(base_url, "/v1/models");
-        let codex_url = build_upstream_url(base_url, CODEX_DISCOVERY_PATH);
-        let openai_result = request_models(client, &openai_url, headers.clone()).await;
-        let codex_result = request_models(client, &codex_url, headers).await;
-
-        let mut found_shape = false;
-        let mut errors: Vec<String> = Vec::new();
-        match openai_result {
-            Ok(payload) => match extract_models(&payload, "data", "id") {
-                Some(page) => {
-                    found_shape = true;
-                    push_models(&mut models, &mut seen, page);
-                }
-                None => errors.push("OpenAI 响应里没有 data[].id".to_string()),
-            },
-            Err(error) => errors.push(error),
-        }
-        match codex_result {
-            Ok(payload) => {
-                if let Some(page) = extract_models(&payload, "models", "slug") {
-                    found_shape = true;
-                    push_models(&mut models, &mut seen, page);
-                }
-            }
-            Err(error) => errors.push(error),
-        }
-
-        if !found_shape {
-            let detail = if errors.is_empty() {
-                "上游响应里没有可识别的模型列表".to_string()
-            } else {
-                errors.join("；")
-            };
-            return json!({ "ok": false, "error": detail });
-        }
+        let url = build_upstream_url(base_url, CODEX_DISCOVERY_PATH);
+        let payload = match request_models(client, &url, headers).await {
+            Ok(payload) => payload,
+            Err(error) => return json!({ "ok": false, "error": error }),
+        };
+        let Some(page) = extract_models(&payload, "models", "slug") else {
+            return json!({ "ok": false, "error": "OpenAI Responses / Codex 响应里没有 models[].slug" });
+        };
+        push_models(&mut models, &mut seen, page);
     }
 
     json!({ "ok": true, "models": models })

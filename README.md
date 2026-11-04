@@ -116,9 +116,10 @@ npm run tauri:dev
 - 名称：用于界面识别
 - Base URL：上游 API 根地址，例如 `https://api.deepseek.com`
 - Token：供应商真实凭据
-- 模型列表：分别维护 Claude / Anthropic 和 OpenAI 两类模型
+- 模型列表：分别维护 Claude / Anthropic、OpenAI Chat 与 OpenAI Responses 三类模型
 
-模型组会用于选择真实模型、读取上下文窗口，并生成 Codex 的 `models.json` 清单。
+Chat 与 Responses 各用自己的模型发现接口拉取。模型组会用于选择真实模型、读取上下文窗口，
+并生成 Codex 的 `models.json` 清单。
 
 ### 3. 配置模型映射
 

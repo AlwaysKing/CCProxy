@@ -52,11 +52,11 @@ fn first_matching_mapping_wins() {
 fn openai_group_uses_chat_for_anthropic_clients() {
     // Anthropic 客户端映射到 OpenAI 模型组时，默认走 Chat 转换。
     let config = base(|value| {
-        value["protocols"][0]["providers"][0]["apiFormat"] = json!("openai_responses");
+        value["protocols"][0]["providers"][0]["apiFormat"] = json!("openai_chat");
     });
     let route = resolve_routing(&config, "anthropic", "claude-sonnet-4").unwrap();
     assert_eq!(route.api_format, "openai_chat");
-    assert_eq!(route.model_group_id, "g_openai");
+    assert_eq!(route.model_group_id, "g_openai_chat");
 }
 
 #[test]
@@ -89,6 +89,7 @@ fn openai_group_uses_responses_for_responses_clients() {
     }));
     let route = resolve_routing(&config, "openai_responses", "gpt-5.5").unwrap();
     assert_eq!(route.api_format, "openai_responses");
+    assert_eq!(route.model_group_id, "g_openai_responses");
 }
 
 #[test]
@@ -122,6 +123,7 @@ fn mapping_upstream_protocol_overrides_client_protocol() {
     }));
     let route = resolve_routing(&config, "anthropic", "claude-sonnet-4").unwrap();
     assert_eq!(route.api_format, "openai_responses");
+    assert_eq!(route.model_group_id, "g_openai_responses");
 }
 
 #[test]

@@ -1,10 +1,15 @@
 <script setup>
-// 供应商编辑弹窗：供应商共享名称、地址与 token，模型列表只分 Claude / OpenAI 两类。
+// 供应商编辑弹窗：供应商共享名称、地址与 token，模型列表按三种上游协议分别维护。
 import { computed, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
 import { BaseButton, BaseDialog, BaseInput, FormField, IconButton } from '@/components/base'
 import { newId } from '@/utils/id'
-import { replaceFetchedModels } from './providerModels.mjs'
+import {
+  groupsForEditor,
+  modelAttributesEnabled,
+  modelListLabel,
+  replaceFetchedModels
+} from './providerModels.mjs'
 
 const props = defineProps({
   modelValue: {
@@ -27,8 +32,12 @@ const FORMATS = [
     label: 'Claude'
   },
   {
-    value: 'openai',
-    label: 'OpenAI'
+    value: 'openai_chat',
+    label: 'OpenAI Chat'
+  },
+  {
+    value: 'openai_responses',
+    label: 'OpenAI Responses'
   }
 ]
 
@@ -43,30 +52,12 @@ function formatLabel(apiFormat) {
   return FORMATS.find((item) => item.value === apiFormat)?.label || apiFormat
 }
 
-function modelListLabel(apiFormat) {
-  if (apiFormat === 'anthropic') return 'Claude 模型列表'
-  if (apiFormat === 'openai') return 'OpenAI / Codex 模型列表'
-  return `${apiFormat} 模型列表`
-}
-
 function showModelAttrs(group) {
-  return group.apiFormat === 'openai'
+  return modelAttributesEnabled(group.apiFormat)
 }
 
 function emptyModel() {
   return { name: '', contextWindow: '', maxContextWindow: '', image: false, reasoning: true }
-}
-
-function emptyGroup(apiFormat) {
-  return {
-    id: `g_${apiFormat}`,
-    apiFormat,
-    models: []
-  }
-}
-
-function createEmptyGroups() {
-  return FORMATS.map((item) => emptyGroup(item.value))
 }
 
 function toRow(model) {
@@ -108,21 +99,15 @@ watch(
     error.value = ''
     fetching.value = false
     showToken.value = false
-    const existing = new Map((props.provider?.modelGroups ?? []).map((group) => [group.apiFormat, group]))
+    const groups = groupsForEditor(props.provider?.modelGroups)
     form.value = {
       name: props.provider?.name ?? '',
       baseUrl: props.provider?.baseUrl ?? '',
       token: props.provider?.token ?? '',
-      modelGroups: FORMATS.map((item) => {
-        const group = existing.get(item.value)
-        return group
-          ? {
-              id: group.id || `g_${item.value}`,
-              apiFormat: item.value,
-              models: (group.models ?? []).map(toRow)
-            }
-          : emptyGroup(item.value)
-      })
+      modelGroups: groups.map((group) => ({
+        ...group,
+        models: group.models.map(toRow)
+      }))
     }
   }
 )
@@ -285,7 +270,7 @@ async function onConfirm() {
         <div>
           <h3 class="models-title">模型列表</h3>
           <p class="models-desc">
-            点击一次拉取，会分别按 Claude 与 OpenAI / Codex 的模型发现协议请求上游并更新对应模型列表。
+            点击一次拉取，会分别按 Claude、OpenAI Chat 与 OpenAI Responses 的模型发现协议请求上游。
           </p>
         </div>
         <BaseButton

@@ -96,7 +96,7 @@ fn legacy_project_models_expand_to_flat_bindings_and_keep_offline_paths() {
         ]
     }));
     let config = result.config.unwrap();
-    assert_eq!(config.version, 6);
+    assert_eq!(config.version, 7);
     assert_eq!(config.settings.project_model_bindings.len(), 2);
     assert_eq!(
         config.settings.project_model_bindings[0].path,
@@ -394,7 +394,7 @@ fn v2_openai_provider_expands_to_groups_and_keeps_capabilities() {
         .iter()
         .map(|group| group.api_format.as_str())
         .collect();
-    assert_eq!(formats, vec!["openai"]);
+    assert_eq!(formats, vec!["openai_chat", "openai_responses"]);
     for group in &provider.model_groups {
         let serialized = serde_json::to_value(&group.models).unwrap();
         assert_eq!(
@@ -407,8 +407,14 @@ fn v2_openai_provider_expands_to_groups_and_keeps_capabilities() {
             }])
         );
     }
-    assert_eq!(config.protocols[1].mappings[0].model_group_id, "g_openai");
-    assert_eq!(config.protocols[2].mappings[0].model_group_id, "g_openai");
+    assert_eq!(
+        config.protocols[1].mappings[0].model_group_id,
+        "g_openai_chat"
+    );
+    assert_eq!(
+        config.protocols[2].mappings[0].model_group_id,
+        "g_openai_responses"
+    );
     assert_eq!(
         config.protocols[1].mappings[0].upstream_protocol,
         "openai_chat"
@@ -420,7 +426,7 @@ fn v2_openai_provider_expands_to_groups_and_keeps_capabilities() {
 }
 
 #[test]
-fn mapping_keeps_an_explicit_model_group() {
+fn mapping_uses_the_group_that_matches_its_explicit_upstream_protocol() {
     let result = validate_config(&json!({
         "providers": [{
             "id": "p1",
@@ -456,8 +462,72 @@ fn mapping_keeps_an_explicit_model_group() {
         }]
     }));
     let mapping = &result.config.unwrap().protocols[2].mappings[0];
-    assert_eq!(mapping.model_group_id, "g_openai");
+    assert_eq!(mapping.model_group_id, "g_openai_responses");
     assert_eq!(mapping.upstream_protocol, "openai_responses");
+}
+
+#[test]
+fn v6_combined_openai_group_splits_and_mappings_follow_upstream_protocol() {
+    let result = validate_config(&json!({
+        "version": 6,
+        "providers": [{
+            "id": "p1",
+            "name": "共享供应商",
+            "enabled": true,
+            "baseUrl": "http://shared",
+            "token": "t",
+            "modelGroups": [{
+                "id": "g_openai",
+                "apiFormat": "openai",
+                "models": [{ "name": "gpt-5.5", "contextWindow": 400000 }]
+            }]
+        }],
+        "protocols": [
+            {
+                "id": "openai_chat",
+                "enabled": true,
+                "mappings": [{
+                    "id": "m_chat",
+                    "enabled": true,
+                    "clientModel": "gpt-5.5-chat",
+                    "providerId": "p1",
+                    "modelGroupId": "g_openai",
+                    "upstreamProtocol": "openai_chat",
+                    "realModel": "gpt-5.5"
+                }]
+            },
+            {
+                "id": "openai_responses",
+                "enabled": true,
+                "mappings": [{
+                    "id": "m_responses",
+                    "enabled": true,
+                    "clientModel": "gpt-5.5",
+                    "providerId": "p1",
+                    "modelGroupId": "g_openai",
+                    "upstreamProtocol": "openai_responses",
+                    "realModel": "gpt-5.5"
+                }]
+            }
+        ]
+    }));
+    let config = result.config.unwrap();
+    let groups = &config.providers[0].model_groups;
+    assert_eq!(
+        groups
+            .iter()
+            .map(|group| group.api_format.as_str())
+            .collect::<Vec<_>>(),
+        vec!["openai_chat", "openai_responses"]
+    );
+    assert!(groups
+        .iter()
+        .all(|group| group.models[0].name == "gpt-5.5"));
+    assert_eq!(config.protocols[1].mappings[0].model_group_id, "g_openai_chat");
+    assert_eq!(
+        config.protocols[2].mappings[0].model_group_id,
+        "g_openai_responses"
+    );
 }
 
 #[test]
@@ -641,8 +711,14 @@ fn legacy_config_hoists_providers_and_splits_openai() {
                 .collect()
         })
         .collect();
-    assert_eq!(formats, vec![vec!["anthropic"], vec!["openai"]]);
-    assert_eq!(config.providers[1].model_groups.len(), 1);
+    assert_eq!(
+        formats,
+        vec![
+            vec!["anthropic"],
+            vec!["openai_chat", "openai_responses"]
+        ]
+    );
+    assert_eq!(config.providers[1].model_groups.len(), 2);
 
     // 迁移要有交代，但不能把老的 openai 条目报成「不支持的协议」
     assert!(result
@@ -672,7 +748,7 @@ fn unknown_api_format_falls_back_to_legacy_openai_groups() {
         .iter()
         .map(|group| group.api_format.as_str())
         .collect();
-    assert_eq!(formats, vec!["openai"]);
+    assert_eq!(formats, vec!["openai_chat", "openai_responses"]);
     assert!(result
         .issues
         .iter()
@@ -691,7 +767,10 @@ fn new_shape_providers_are_read_from_the_top_level() {
     let config = result.config.unwrap();
     assert_eq!(config.providers.len(), 1);
     assert_eq!(config.providers[0].model_groups.len(), 1);
-    assert_eq!(config.providers[0].model_groups[0].api_format, "openai");
+    assert_eq!(
+        config.providers[0].model_groups[0].api_format,
+        "openai_responses"
+    );
     assert_eq!(config.protocols[2].mappings.len(), 1);
     // 新结构下不该出现迁移提示
     assert!(!result
@@ -765,7 +844,13 @@ fn same_id_with_different_inferred_format_is_not_merged() {
                 .collect()
         })
         .collect();
-    assert_eq!(formats, vec![vec!["anthropic"], vec!["openai"]]);
+    assert_eq!(
+        formats,
+        vec![
+            vec!["anthropic"],
+            vec!["openai_chat", "openai_responses"]
+        ]
+    );
 }
 
 #[test]
@@ -883,7 +968,7 @@ fn loading_a_v2_file_backs_up_and_expands_models_without_losing_abilities() {
 
     let loaded = manager.load();
     assert!(!loaded.recovered);
-    assert_eq!(loaded.config.providers[0].model_groups.len(), 1);
+    assert_eq!(loaded.config.providers[0].model_groups.len(), 2);
     for group in &loaded.config.providers[0].model_groups {
         assert_eq!(group.models[0].context_window, Some(400000));
         assert_eq!(group.models[0].reasoning, Some(true));
@@ -901,7 +986,7 @@ fn loading_a_v2_file_backs_up_and_expands_models_without_losing_abilities() {
             .as_array()
             .unwrap()
             .len(),
-        1
+        2
     );
     assert!(saved["providers"][0].get("apiFormat").is_none());
 }
@@ -957,23 +1042,28 @@ fn loading_intermediate_v3_promotes_group_address_and_token() {
         "https://shared.example.com/v1"
     );
     assert_eq!(loaded.config.providers[0].token, "sk-shared");
-    assert_eq!(loaded.config.providers[0].model_groups.len(), 1);
+    assert_eq!(loaded.config.providers[0].model_groups.len(), 2);
     assert_eq!(
         loaded.config.providers[0].model_groups[0].api_format,
-        "openai"
+        "openai_chat"
     );
-    assert_eq!(loaded.config.providers[0].model_groups[0].models.len(), 2);
+    assert_eq!(
+        loaded.config.providers[0].model_groups[1].api_format,
+        "openai_responses"
+    );
+    assert_eq!(loaded.config.providers[0].model_groups[0].models.len(), 1);
+    assert_eq!(loaded.config.providers[0].model_groups[1].models.len(), 1);
     assert_eq!(
         loaded.config.providers[0].model_groups[0].models[0].context_window,
         Some(400000)
     );
     assert_eq!(
-        loaded.config.providers[0].model_groups[0].models[1].reasoning,
+        loaded.config.providers[0].model_groups[1].models[0].reasoning,
         Some(true)
     );
     assert_eq!(
         loaded.config.protocols[2].mappings[0].model_group_id,
-        "g_openai"
+        "g_openai_responses"
     );
     assert_eq!(
         loaded.config.protocols[2].mappings[0].upstream_protocol,

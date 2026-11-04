@@ -12,10 +12,11 @@ const configStore = useConfigStore()
 
 const providers = computed(() => configStore.providers)
 
-// 模型列表固定为 Claude 与 OpenAI 两类
+// 模型列表按三种上游协议分别维护
 const FORMAT_LABELS = {
   anthropic: 'Claude',
-  openai: 'OpenAI'
+  openai_chat: 'OpenAI Chat',
+  openai_responses: 'OpenAI Responses'
 }
 
 function formatLabel(apiFormat) {
@@ -26,11 +27,11 @@ function modelCount(provider) {
   return (provider.modelGroups ?? []).reduce((total, group) => total + (group.models?.length ?? 0), 0)
 }
 
-// 支持的模型族图标：Claude 与 OpenAI 各一枚。OpenAI 的 chat 与 responses 在上游是同一个接口、
-// 拉下来是同一份模型列表，所以按族去重，一个供应商最多出两枚图标
+// 支持的模型族图标：Claude 与 OpenAI 各一枚；Chat / Responses 同属 OpenAI，图标按族去重。
 const FAMILY_BY_FORMAT = {
   anthropic: 'anthropic',
-  openai: 'openai'
+  openai_chat: 'openai',
+  openai_responses: 'openai'
 }
 
 function modelFamilies(provider) {
@@ -91,7 +92,7 @@ const deletingDescription = computed(() => {
 <template>
   <ModuleCard title="代理商模块" :notice="notice">
     <template #desc>
-      上游供应商共用地址与 token，模型列表只分 Claude / OpenAI 两类；三个协议共用同一份供应商池
+      上游供应商共用地址与 token，模型列表按 Claude / OpenAI Chat / OpenAI Responses 分别维护
     </template>
     <!-- 添加按钮只挂在标题右侧这一处，空态里不再放第二个：同一个动作两个位置各有一个，
          而且空态比一行数据高，卡片高度会在「空 / 有内容」之间跳 -->
@@ -135,7 +136,7 @@ const deletingDescription = computed(() => {
         <div class="provider-models">
           <span v-if="modelCount(provider) === 0" class="provider-models-empty">未配置模型</span>
           <template v-else>
-            <span v-for="group in provider.modelGroups.filter((item) => item.models.length).slice(0, 2)" :key="group.id" class="provider-model">
+            <span v-for="group in provider.modelGroups.filter((item) => item.models.length).slice(0, 3)" :key="group.id" class="provider-model">
               {{ formatLabel(group.apiFormat) }} {{ group.models.length }}
             </span>
           </template>

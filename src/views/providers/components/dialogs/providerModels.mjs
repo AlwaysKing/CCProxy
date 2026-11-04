@@ -2,6 +2,37 @@ function emptyModelRow() {
   return { name: '', contextWindow: '', maxContextWindow: '', image: false, reasoning: true }
 }
 
+const EDITOR_FORMATS = ['anthropic', 'openai_chat', 'openai_responses']
+
+export function modelAttributesEnabled(apiFormat) {
+  return apiFormat === 'openai_responses'
+}
+
+export function modelListLabel(apiFormat) {
+  if (apiFormat === 'anthropic') return 'Claude 模型列表'
+  if (apiFormat === 'openai_chat') return 'OpenAI Chat 模型列表'
+  if (apiFormat === 'openai_responses') return 'OpenAI Responses 模型列表'
+  return `${apiFormat} 模型列表`
+}
+
+export function groupsForEditor(groups) {
+  const existing = new Map()
+  for (const group of groups ?? []) {
+    if (group?.apiFormat) existing.set(group.apiFormat, group)
+  }
+  const legacyOpenAI = existing.get('openai')
+  return EDITOR_FORMATS.map((apiFormat) => {
+    const source =
+      existing.get(apiFormat) ||
+      (apiFormat === 'anthropic' ? null : legacyOpenAI)
+    return {
+      id: source && source.apiFormat === apiFormat ? source.id : `g_${apiFormat}`,
+      apiFormat,
+      models: source?.models ?? []
+    }
+  })
+}
+
 export function replaceFetchedModels(existingRows, fetchedNames) {
   const existingByName = new Map()
   for (const row of existingRows ?? []) {

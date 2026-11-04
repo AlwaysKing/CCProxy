@@ -11,26 +11,28 @@ use serde_json::{json, Value};
 // 版本号只标记写出的配置形态，加载时不比对：新版读旧配置是兼容的（老结构走迁移，
 // 模型条目两种写法都认），但旧版读新配置不兼容，所以不承诺降级回滚。
 // v2：协议拆成三条，供应商从 protocols[].providers 提到顶层并声明 apiFormat。
-// v4：供应商仍是全局池，地址与 token 挂在供应商上；模型列表只分 Claude / OpenAI 两类，
-// 映射明确记录上游协议，路由直接按它决定透传或转换。
+// v4：供应商仍是全局池，地址与 token 挂在供应商上。
 // v5：映射表顺序即匹配优先级；低版本配置升级时按旧优先级稳定排序一次，命中结果不变。
-pub const CONFIG_VERSION: u32 = 6;
+// v7：模型列表按 Anthropic / OpenAI Chat / OpenAI Responses 三组维护；旧 OpenAI 组合模型组
+// 升级时复制成 Chat 与 Responses 两份，映射按 upstreamProtocol 改指对应组。
+pub const CONFIG_VERSION: u32 = 7;
 // 从这一版起列表顺序决定匹配优先级，低于它的配置需要按旧语义整理一次
 const MAPPING_ORDER_VERSION: u32 = 5;
 pub const DEFAULT_PORT: u16 = 18888;
 // 客户端线格式三条线。协议只决定「客户端发来的模型名按哪张映射表查」；
-// 模型属于 Claude 还是 OpenAI 由映射所属模型组决定；OpenAI 的 Chat / Responses 目标由映射协议决定。
+// 模型组也按同一组线格式维护，映射所属模型组必须与 upstreamProtocol 一致。
 pub const SUPPORTED_PROTOCOLS: [(&str, &str); 3] = [
     ("anthropic", "Anthropic"),
     ("openai_chat", "OpenAI Chat"),
     ("openai_responses", "OpenAI Responses"),
 ];
-// 模型列表类型。供应商层面只区分 Claude 与 OpenAI；具体 Chat / Responses 由映射协议决定。
-pub const API_FORMATS: [&str; 2] = ["anthropic", "openai"];
+// 模型列表类型。Chat 与 Responses 的模型发现、能力和窗口配置完全独立。
+pub const API_FORMATS: [&str; 3] = ["anthropic", "openai_chat", "openai_responses"];
 pub fn api_format_label(id: &str) -> &str {
     match id {
         "anthropic" => "Claude",
-        "openai" => "OpenAI",
+        "openai_chat" => "OpenAI Chat",
+        "openai_responses" => "OpenAI Responses",
         _ => "未知格式",
     }
 }
@@ -90,7 +92,7 @@ pub struct Model {
 #[serde(rename_all = "camelCase")]
 pub struct ModelGroup {
     pub id: String,
-    // 模型列表类型：anthropic | openai
+    // 模型列表类型：anthropic | openai_chat | openai_responses
     pub api_format: String,
     pub models: Vec<Model>,
 }
@@ -352,19 +354,22 @@ fn normalize_models(
     models
 }
 
-fn canonical_model_format(value: &str) -> Option<&'static str> {
+fn model_formats_for(value: &str) -> Option<Vec<&'static str>> {
     match value {
-        "anthropic" => Some("anthropic"),
-        "openai" | "openai_chat" | "openai_responses" => Some("openai"),
+        "anthropic" => Some(vec!["anthropic"]),
+        "openai" => Some(vec!["openai_chat", "openai_responses"]),
+        "openai_chat" => Some(vec!["openai_chat"]),
+        "openai_responses" => Some(vec!["openai_responses"]),
         _ => None,
     }
 }
 
-fn protocol_model_format(protocol_id: &str) -> &'static str {
-    if protocol_id == "anthropic" {
-        "anthropic"
-    } else {
-        "openai"
+fn protocol_model_format(protocol_id: &str) -> Option<&'static str> {
+    match protocol_id {
+        "anthropic" => Some("anthropic"),
+        "openai_chat" => Some("openai_chat"),
+        "openai_responses" => Some("openai_responses"),
+        _ => None,
     }
 }
 
@@ -373,20 +378,24 @@ fn is_upstream_protocol(value: &str) -> bool {
 }
 
 fn protocol_allowed_for_group(group_format: &str, upstream_protocol: &str) -> bool {
-    match group_format {
-        "anthropic" => upstream_protocol == "anthropic",
-        "openai" => matches!(upstream_protocol, "openai_chat" | "openai_responses"),
-        _ => false,
-    }
+    is_upstream_protocol(group_format) && group_format == upstream_protocol
 }
 
 fn default_upstream_protocol(group_format: &str, protocol_id: &str) -> String {
-    if group_format == "anthropic" {
-        "anthropic".to_string()
+    if is_upstream_protocol(group_format) {
+        group_format.to_string()
     } else if protocol_id == "openai_responses" {
         "openai_responses".to_string()
     } else {
         "openai_chat".to_string()
+    }
+}
+
+fn default_openai_model_format(protocol_id: &str) -> &'static str {
+    if protocol_id == "openai_responses" {
+        "openai_responses"
+    } else {
+        "openai_chat"
     }
 }
 
@@ -419,38 +428,41 @@ fn merge_model_group(existing: &mut ModelGroup, incoming: ModelGroup) {
     }
 }
 
-fn normalize_model_group(
+fn normalize_model_groups(
     raw: &Value,
     fallback_format: Option<&str>,
     provider_id: &str,
     issues: &mut Vec<String>,
-) -> Option<ModelGroup> {
+) -> Vec<ModelGroup> {
     if !is_plain_object(raw) {
         issues.push(format!("供应商 {provider_id} 下存在非法模型组，已丢弃"));
-        return None;
+        return Vec::new();
     }
     let declared = raw
         .get("apiFormat")
         .and_then(as_str)
         .map(str::trim)
         .unwrap_or("");
-    let api_format = if let Some(format) = canonical_model_format(declared) {
-        format.to_string()
-    } else if let Some(format) = fallback_format.and_then(canonical_model_format) {
-        format.to_string()
+    let formats = if let Some(formats) = model_formats_for(declared) {
+        formats
+    } else if let Some(formats) = fallback_format.and_then(model_formats_for) {
+        formats
     } else {
         issues.push(format!(
             "供应商 {provider_id} 的模型组 apiFormat 非法（{}），已丢弃",
             json_text(&raw.get("apiFormat").cloned().unwrap_or(Value::Null))
         ));
-        return None;
+        return Vec::new();
     };
-    let id = format!("g_{api_format}");
-    Some(ModelGroup {
-        id,
-        api_format,
-        models: normalize_models(raw.get("models"), provider_id, issues),
-    })
+    let models = normalize_models(raw.get("models"), provider_id, issues);
+    formats
+        .into_iter()
+        .map(|api_format| ModelGroup {
+            id: format!("g_{api_format}"),
+            api_format: api_format.to_string(),
+            models: models.clone(),
+        })
+        .collect()
 }
 
 fn legacy_provider_formats(
@@ -459,13 +471,13 @@ fn legacy_provider_formats(
     provider_id: &str,
     issues: &mut Vec<String>,
 ) -> Vec<String> {
-    if let Some(format) = canonical_model_format(declared) {
-        return vec![format.to_string()];
+    if let Some(formats) = model_formats_for(declared) {
+        return formats.into_iter().map(str::to_string).collect();
     }
 
     let mut formats: Vec<String> = Vec::new();
     for protocol_id in referenced_protocols {
-        let Some(format) = canonical_model_format(protocol_id) else {
+        let Some(format) = protocol_model_format(protocol_id) else {
             continue;
         };
         if !formats.iter().any(|item| item == format) {
@@ -478,7 +490,9 @@ fn legacy_provider_formats(
         ));
     }
     if formats.is_empty() {
-        formats.push("openai".to_string());
+        // 老配置里没有可推断的映射时，保持旧 OpenAI 两条路径都可用。
+        formats.push("openai_chat".to_string());
+        formats.push("openai_responses".to_string());
     }
     formats
 }
@@ -567,17 +581,16 @@ fn normalize_provider(
     let mut model_groups: Vec<ModelGroup> = Vec::new();
     if let Some(items) = raw.get("modelGroups").and_then(Value::as_array) {
         for item in items {
-            let Some(group) = normalize_model_group(item, fallback_format, id, issues) else {
-                continue;
-            };
-            if let Some(existing) = model_groups
-                .iter_mut()
-                .find(|kept| kept.api_format == group.api_format)
-            {
-                merge_model_group(existing, group);
-                continue;
+            for group in normalize_model_groups(item, fallback_format, id, issues) {
+                if let Some(existing) = model_groups
+                    .iter_mut()
+                    .find(|kept| kept.api_format == group.api_format)
+                {
+                    merge_model_group(existing, group);
+                } else {
+                    model_groups.push(group);
+                }
             }
-            model_groups.push(group);
         }
     } else {
         let declared = raw
@@ -585,10 +598,10 @@ fn normalize_provider(
             .and_then(as_str)
             .map(str::trim)
             .unwrap_or("");
-        let formats = if let Some(format) = canonical_model_format(declared) {
-            vec![format.to_string()]
-        } else if let Some(format) = fallback_format.and_then(canonical_model_format) {
-            vec![format.to_string()]
+        let formats = if let Some(formats) = model_formats_for(declared) {
+            formats.into_iter().map(str::to_string).collect()
+        } else if let Some(formats) = fallback_format.and_then(model_formats_for) {
+            formats.into_iter().map(str::to_string).collect()
         } else {
             legacy_provider_formats(declared, referenced_protocols, id, issues)
         };
@@ -657,10 +670,11 @@ fn normalize_mapping(
         .and_then(as_str)
         .filter(|value| is_upstream_protocol(value));
     let group = if let Some(upstream_protocol) = requested_upstream {
+        let format = protocol_model_format(upstream_protocol)?;
         provider
             .model_groups
             .iter()
-            .find(|item| item.api_format == protocol_model_format(upstream_protocol))
+            .find(|item| item.api_format == format)
     } else if !requested_group.is_empty() {
         provider
             .model_groups
@@ -671,18 +685,22 @@ fn normalize_mapping(
                     || requested_group.contains("chat")
                     || requested_group.contains("responses"))
                 .then(|| {
+                    let format = default_openai_model_format(protocol_id);
                     provider
                         .model_groups
                         .iter()
-                        .find(|item| item.api_format == "openai")
+                        .find(|item| item.api_format == format)
                 })
                 .flatten()
             })
     } else {
-        provider
-            .model_groups
-            .iter()
-            .find(|item| item.api_format == protocol_model_format(protocol_id))
+        protocol_model_format(protocol_id)
+            .and_then(|format| {
+                provider
+                    .model_groups
+                    .iter()
+                    .find(|item| item.api_format == format)
+            })
             .or_else(|| provider.model_groups.first())
     };
     let Some(group) = group else {
