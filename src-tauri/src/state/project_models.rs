@@ -187,6 +187,9 @@ impl AppState {
     }
 
     pub(super) fn sync_all_project_models_locked(self: &Arc<Self>, config: &AppConfig) {
+        if !config.settings.project_management_enabled {
+            return;
+        }
         let daemon_pid = self
             .codex_daemon()
             .filter(|daemon| daemon.running)
@@ -289,6 +292,9 @@ impl AppState {
         self: &Arc<Self>,
         refresh: bool,
     ) -> Vec<DiscoveredProject> {
+        if !self.project_management_enabled() {
+            return Vec::new();
+        }
         if !refresh {
             if let Ok(cache) = self.project_candidates.read() {
                 if let Some(projects) = cache.as_ref() {
@@ -307,6 +313,9 @@ impl AppState {
         let projects = tokio::task::spawn_blocking(discover_default_projects)
             .await
             .unwrap_or_default();
+        if !self.project_management_enabled() {
+            return Vec::new();
+        }
         if let Ok(mut cache) = self.project_candidates.write() {
             *cache = Some(projects.clone());
         }
@@ -314,10 +323,22 @@ impl AppState {
     }
 
     pub fn prime_project_candidates(self: &Arc<Self>) {
+        if !self.project_management_enabled() {
+            return;
+        }
         let state = self.clone();
         tauri::async_runtime::spawn(async move {
             state.ensure_project_candidates(true).await;
         });
+    }
+
+    pub(super) fn reset_project_management_runtime(&self) {
+        if let Ok(mut cache) = self.project_candidates.write() {
+            *cache = None;
+        }
+        if let Ok(mut statuses) = self.project_sync_status.write() {
+            statuses.clear();
+        }
     }
 
     pub fn cache_project_candidates(&self, projects: Vec<DiscoveredProject>) {
@@ -330,6 +351,13 @@ impl AppState {
         self: &Arc<Self>,
         refresh: bool,
     ) -> UnifiedProjectModelsView {
+        if !self.project_management_enabled() {
+            return UnifiedProjectModelsView {
+                candidates: ProjectModelCandidates::default(),
+                projects: Vec::new(),
+                codex_daemon: None,
+            };
+        }
         self.refresh_restart_required();
         let config = self.config_snapshot();
         let discovered = self.ensure_project_candidates(refresh).await;
@@ -411,6 +439,9 @@ impl AppState {
         client: &str,
         mapping_id: Option<&str>,
     ) -> Result<Option<ProjectSyncStatusSnapshot>, String> {
+        if !self.project_management_enabled() {
+            return Err("项目管理功能已禁用".to_string());
+        }
         if client != "codex" && client != "claude" {
             return Err("未知的客户端类型".to_string());
         }

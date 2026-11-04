@@ -129,6 +129,38 @@ async fn unified_view_merges_sources_and_sorts_paths() {
 }
 
 #[tokio::test]
+async fn disabled_project_management_hides_view_and_rejects_updates() {
+    let project = TempDir::new("ccproxy-unified-disabled");
+    let path = std::fs::canonicalize(&project.path)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let mut config = routing_config(vec![json!({
+        "id": "b1",
+        "path": path,
+        "client": "codex",
+        "mappingId": "m1"
+    })]);
+    config.settings.project_management_enabled = false;
+    let state = test_state(config, &TempDir::new("ccproxy-unified-disabled-config"));
+    state.cache_project_candidates(vec![candidate(&path, true, true)]);
+
+    let view = state.unified_project_models_view(false).await;
+    assert!(view.projects.is_empty());
+    assert!(view.candidates.codex.is_empty());
+    assert!(view.candidates.claude.is_empty());
+
+    let error = state
+        .set_project_model(&path, "codex", Some("m1"))
+        .await
+        .unwrap_err();
+    assert!(error.contains("项目管理功能已禁用"));
+    let bindings = state.config_snapshot().settings.project_model_bindings;
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].id, "b1");
+}
+
+#[tokio::test]
 async fn set_model_preserves_binding_id_and_clear_keeps_client_file() {
     let project = TempDir::new("ccproxy-unified-set");
     let state = test_state(

@@ -163,6 +163,7 @@ mod tests {
             settings: Settings {
                 port: DEFAULT_PORT,
                 launch_at_login: false,
+                project_management_enabled: true,
                 logs_enabled: true,
                 usage_enabled: true,
                 client_dirs: Vec::new(),

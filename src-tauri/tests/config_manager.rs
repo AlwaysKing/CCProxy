@@ -1149,6 +1149,25 @@ fn default_log_and_usage_switches_are_on() {
 }
 
 #[test]
+fn project_management_switch_defaults_to_on() {
+    let config = create_default_config();
+    assert!(config.settings.project_management_enabled);
+
+    let absent = validate_config(&json!({ "protocols": [] })).config.unwrap();
+    assert!(absent.settings.project_management_enabled);
+
+    let off = validate_config(&json!({ "settings": { "projectManagementEnabled": false } }))
+        .config
+        .unwrap();
+    assert!(!off.settings.project_management_enabled);
+
+    let weird = validate_config(&json!({ "settings": { "projectManagementEnabled": "no" } }))
+        .config
+        .unwrap();
+    assert!(weird.settings.project_management_enabled);
+}
+
+#[test]
 fn log_and_usage_switches_default_to_on() {
     let absent = validate_config(&json!({ "protocols": [] })).config.unwrap();
     assert!(absent.settings.logs_enabled);

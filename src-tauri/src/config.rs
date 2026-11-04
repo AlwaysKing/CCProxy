@@ -64,6 +64,7 @@ pub struct ProjectModelBinding {
 pub struct Settings {
     pub port: u16,
     pub launch_at_login: bool,
+    pub project_management_enabled: bool,
     pub logs_enabled: bool,
     pub usage_enabled: bool,
     pub client_dirs: Vec<ClientDir>,
@@ -150,6 +151,7 @@ pub fn create_default_config() -> AppConfig {
         settings: Settings {
             port: DEFAULT_PORT,
             launch_at_login: false,
+            project_management_enabled: true,
             logs_enabled: true,
             usage_enabled: true,
             client_dirs: Vec::new(),
@@ -1341,6 +1343,11 @@ pub fn validate_config(raw: &Value) -> Validated {
         settings: Settings {
             port: port.map(|value| value as u16).unwrap_or(DEFAULT_PORT),
             launch_at_login: settings.get("launchAtLogin").and_then(Value::as_bool) == Some(true),
+            // 项目管理是可选模块，老配置没有该键时默认启用
+            project_management_enabled: settings
+                .get("projectManagementEnabled")
+                .and_then(Value::as_bool)
+                != Some(false),
             // 开关缺省即开启：老配置里没有这两个键，读出来必须还是记录，行为不回退
             logs_enabled: settings.get("logsEnabled").and_then(Value::as_bool) != Some(false),
             usage_enabled: settings.get("usageEnabled").and_then(Value::as_bool) != Some(false),

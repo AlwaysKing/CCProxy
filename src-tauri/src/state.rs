@@ -116,6 +116,13 @@ impl AppState {
             .unwrap_or_else(|_| crate::config::create_default_config())
     }
 
+    pub fn project_management_enabled(&self) -> bool {
+        self.config
+            .read()
+            .map(|config| config.settings.project_management_enabled)
+            .unwrap_or(true)
+    }
+
     pub fn port(&self) -> u16 {
         self.config
             .read()
@@ -293,10 +300,23 @@ impl AppState {
                 config.settings.project_model_bindings != next.settings.project_model_bindings
             })
             .unwrap_or(true);
+        let project_management_enabled = next.settings.project_management_enabled;
+        let project_management_was_enabled = previous
+            .map(|config| config.settings.project_management_enabled)
+            .unwrap_or(project_management_enabled);
         if protocols_changed {
             self.sync_managed_codex_catalogs();
         }
-        if projects_changed || protocols_changed || providers_changed {
+        if !project_management_enabled {
+            self.reset_project_management_runtime();
+        } else if projects_changed
+            || protocols_changed
+            || providers_changed
+            || !project_management_was_enabled
+        {
+            if !project_management_was_enabled {
+                self.prime_project_candidates();
+            }
             self.sync_all_project_models_locked(next);
         }
     }

@@ -261,6 +261,9 @@ pub async fn remove_client_dir(
 
 #[tauri::command]
 pub async fn get_project_models(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    if !state.project_management_enabled() {
+        return Ok(error_value("项目管理功能已禁用"));
+    }
     let view = state.unified_project_models_view(false).await;
     Ok(json!({
         "success": true,
@@ -270,6 +273,9 @@ pub async fn get_project_models(state: State<'_, Arc<AppState>>) -> Result<Value
 
 #[tauri::command]
 pub async fn refresh_project_models(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    if !state.project_management_enabled() {
+        return Ok(error_value("项目管理功能已禁用"));
+    }
     let view = state.unified_project_models_view(true).await;
     Ok(json!({
         "success": true,
@@ -284,6 +290,9 @@ pub async fn set_project_model(
     client: String,
     mapping_id: Option<String>,
 ) -> Result<Value, String> {
+    if !state.project_management_enabled() {
+        return Ok(error_value("项目管理功能已禁用"));
+    }
     match state
         .set_project_model(path.trim(), &client, mapping_id.as_deref())
         .await

@@ -1,5 +1,5 @@
 <script setup>
-// 设置页：端口、客户端 token、开机自启、客户端目录、数据存储。
+// 设置页：端口、客户端 token、功能开关、客户端目录、数据存储。
 // 端口保存后由主进程判断要不要按新端口重启（applyConfig 的副作用）——这里不发重启指令，
 // 托盘或别处改配置走的也是同一条路，两边行为必须一致
 import { computed, onMounted, ref, watch } from 'vue'
@@ -49,6 +49,17 @@ async function onToggleLaunchAtLogin(value) {
   notice.value = ''
   const ok = await configStore.updateSetting('launchAtLogin', value)
   if (!ok) notice.value = configStore.error || '保存失败'
+}
+
+const projectManagementEnabled = computed(
+  () => configStore.config?.settings.projectManagementEnabled !== false
+)
+
+async function onToggleProjectManagement(value) {
+  notice.value = ''
+  const ok = await configStore.updateSetting('projectManagementEnabled', value)
+  if (!ok) notice.value = configStore.error || '保存失败'
+  else if (!value) notice.value = '项目管理已关闭；既有绑定会保留，重新开启后恢复同步'
 }
 
 // 请求日志 / 用量记录的记录开关（缺省即开启）。关掉后主进程不再落对应数据，历史保留
@@ -240,6 +251,20 @@ onMounted(() => {
         </div>
         <div class="setting-control">
           <Toggle :model-value="launchAtLogin" :disabled="configStore.saving" @change="onToggleLaunchAtLogin" />
+        </div>
+      </div>
+
+      <div class="setting-row">
+        <div class="setting-info">
+          <span class="setting-name">项目管理</span>
+          <span class="setting-desc">显示项目管理入口，并同步 Claude / Codex 项目的默认模型；关闭后停止扫描和同步，既有绑定保留，重新开启后恢复</span>
+        </div>
+        <div class="setting-control">
+          <Toggle
+            :model-value="projectManagementEnabled"
+            :disabled="configStore.saving"
+            @change="onToggleProjectManagement"
+          />
         </div>
       </div>
     </div>

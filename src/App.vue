@@ -1,7 +1,7 @@
 <script setup>
 // 应用壳：顶部工具条 + 内容区。
 // 顶栏保留页面入口与代理状态；协议切换放在模型映射页的映射模块标题行。
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
 import { useProxyStore } from '@/stores/useProxyStore'
 import { useClientDirsStore } from '@/stores/useClientDirsStore'
@@ -28,6 +28,12 @@ const clientDirsStore = useClientDirsStore()
 
 const activeView = ref('providers')
 const activeProtocolId = ref(null)
+const projectManagementEnabled = computed(
+  () => configStore.config?.settings.projectManagementEnabled !== false
+)
+const visibleViewItems = computed(() =>
+  VIEW_ITEMS.filter((item) => item.key !== 'projects' || projectManagementEnabled.value)
+)
 
 // 协议来自配置：配置被重建或协议列表变化后选中项可能失效，兜底回第一个，
 // 免得两个模块拿到一个不存在的协议而渲染成空白
@@ -38,6 +44,11 @@ watch(
   },
   { immediate: true }
 )
+
+// 配置被外部改动时也要立即退出已关闭的模块，不能只依赖设置页里的那次切换
+watch(projectManagementEnabled, (enabled) => {
+  if (!enabled && activeView.value === 'projects') activeView.value = 'settings'
+})
 
 async function onToggleProxy() {
   if (proxyStore.isRunning) await proxyStore.stop()
@@ -92,7 +103,7 @@ onUnmounted(() => {
 
         <nav class="app-view-nav">
           <button
-            v-for="item in VIEW_ITEMS"
+            v-for="item in visibleViewItems"
             :key="item.key"
             type="button"
             class="app-view-item"
@@ -119,7 +130,7 @@ onUnmounted(() => {
     </header>
 
     <main class="app-main">
-      <ProjectsView v-if="activeView === 'projects'" />
+      <ProjectsView v-if="projectManagementEnabled && activeView === 'projects'" />
       <ProvidersView v-else-if="activeView === 'providers'" v-model:protocol-id="activeProtocolId" />
       <LogsView v-else-if="activeView === 'logs'" />
       <UsageView v-else-if="activeView === 'usage'" />

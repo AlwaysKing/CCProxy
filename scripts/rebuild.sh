@@ -41,6 +41,13 @@ for arg in "$@"; do
     esac
 done
 
+# 确保前端和 Tauri CLI 依赖已安装
+if [ ! -x node_modules/.bin/vite ] || { [ "$ONLY_BUILD" = false ] && [ ! -x node_modules/.bin/tauri ]; }; then
+    echo -e "${YELLOW}依赖未安装，正在执行 npm ci...${NC}"
+    npm ci
+    echo ""
+fi
+
 # 清理旧的构建文件
 if [ "$SKIP_CLEAN" = false ]; then
     echo -e "${YELLOW}[1/3] 清理旧的构建文件...${NC}"
@@ -67,7 +74,7 @@ fi
 
 # 打包应用：tauri build 会先跑 beforeBuildCommand（npm run build）再编译 Rust 侧
 echo -e "${YELLOW}[2/3] 构建前端 + 编译打包应用（Rust release，第一次会比较久）...${NC}"
-npx tauri build --bundles app
+npm run tauri:build -- --bundles app
 echo ""
 
 # 显示结果
@@ -81,4 +88,3 @@ echo -e "${BLUE}应用位置:${NC}"
 ls -lh src-tauri/target/release/bundle/macos/CCProxy.app 2>/dev/null || echo "src-tauri/target/release/bundle/macos/"
 echo ""
 echo -e "${BLUE}提示: 运行 'open src-tauri/target/release/bundle/macos/CCProxy.app' 启动应用${NC}"
-
