@@ -61,16 +61,39 @@ fn match_models_request_only_accepts_get_models_paths() {
 fn resolve_client_protocol_prefers_anthropic_headers() {
     let mut map = HeaderMap::new();
     map.insert("anthropic-version", "2023-06-01".parse().unwrap());
-    assert_eq!(resolve_client_protocol(&map), "anthropic");
+    assert_eq!(resolve_client_protocol(&map, "/v1/models"), "anthropic");
 
     let mut map = HeaderMap::new();
     map.insert("x-api-key", "sk-fake".parse().unwrap());
-    assert_eq!(resolve_client_protocol(&map), "anthropic");
+    assert_eq!(resolve_client_protocol(&map, "/v1/models"), "anthropic");
 
     let mut map = HeaderMap::new();
     map.insert("authorization", "Bearer sk-fake".parse().unwrap());
-    assert_eq!(resolve_client_protocol(&map), "openai_chat");
-    assert_eq!(resolve_client_protocol(&HeaderMap::new()), "openai_chat");
+    assert_eq!(resolve_client_protocol(&map, "/v1/models"), "openai_chat");
+    assert_eq!(resolve_client_protocol(&HeaderMap::new(), "/v1/models"), "openai_chat");
+}
+
+#[test]
+fn resolve_client_protocol_uses_model_discovery_query_parameters() {
+    let mut anthropic_headers = HeaderMap::new();
+    anthropic_headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+
+    assert_eq!(
+        resolve_client_protocol(&HeaderMap::new(), "/v1/models?client_version=0.165.0"),
+        "codex"
+    );
+    assert_eq!(
+        resolve_client_protocol(&anthropic_headers, "/v1/models?client_version=0.165.0&limit=1000"),
+        "codex"
+    );
+    assert_eq!(
+        resolve_client_protocol(&HeaderMap::new(), "/v1/models?limit=1000"),
+        "anthropic"
+    );
+    assert_eq!(
+        resolve_client_protocol(&HeaderMap::new(), "/v1/models?client_version="),
+        "openai_chat"
+    );
 }
 
 #[test]
@@ -114,6 +137,48 @@ fn openai_list_format() {
     assert_eq!(data[0]["object"], json!("model"));
     assert_eq!(data[0]["owned_by"], json!("ccproxy"));
     assert!(data[0]["created"].is_i64());
+}
+
+#[test]
+fn codex_catalog_format_uses_openai_responses_mappings() {
+    let config = base(|value| {
+        value["protocols"][1]["enabled"] = json!(true);
+        value["protocols"][1]["providers"] = json!([{
+            "id": "p1",
+            "name": "Codex 供应商",
+            "enabled": true,
+            "baseUrl": "http://codex.example.com",
+            "token": "t",
+            "models": [{
+                "name": "m1",
+                "contextWindow": 128000,
+                "maxContextWindow": 256000,
+                "inputModalities": ["text", "image"],
+                "reasoning": true
+            }]
+        }]);
+        value["protocols"][1]["mappings"] = json!([
+            { "id": "m-codex", "enabled": true, "clientModel": "codex-model", "providerId": "p1", "realModel": "m1" },
+            { "id": "m-codex-wild", "enabled": true, "clientModel": "codex-*", "providerId": "p1", "realModel": "m1" }
+        ]);
+    });
+
+    let (status, payload) = build_models_response(&config, "codex", None);
+
+    assert_eq!(status, 200);
+    assert!(payload.get("data").is_none());
+    let models = payload["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["slug"], json!("codex-model"));
+    assert_eq!(models[0]["display_name"], json!("codex-model"));
+    assert_eq!(models[0]["context_window"], json!(128000));
+    assert_eq!(models[0]["max_context_window"], json!(256000));
+    assert_eq!(models[0]["input_modalities"], json!(["text", "image"]));
+    assert!(!models[0]["supported_reasoning_levels"].as_array().unwrap().is_empty());
+    assert_eq!(models[0]["visibility"], json!("list"));
+    assert_eq!(models[0]["supported_in_api"], json!(true));
+    assert!(models[0].get("truncation_policy").is_some());
+    assert!(models[0].get("base_instructions").is_some());
 }
 
 #[test]

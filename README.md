@@ -177,9 +177,15 @@ codex app-server daemon restart
 | `/v1/chat/completions` | OpenAI Chat | OpenAI Chat Completions |
 | `/v1/completions`、`/v1/embeddings` | OpenAI Chat | 按同族线格式转发 |
 | `/v1/responses` | OpenAI Responses | Codex 使用的 Responses API |
-| `GET /v1/models*` | Anthropic / OpenAI | 由 CCProxy 按当前映射表直接生成 |
+| `GET /v1/models` | OpenAI Chat | 默认返回 OpenAI `data[].id` 结构 |
+| `GET /v1/models?limit=1000` | Claude Code | 返回 Anthropic `data[].id` 结构 |
+| `GET /v1/models?client_version=...` | Codex | 返回 Codex 原生 `models[].slug` 目录 |
+| `GET /v1/models/{id}` | Anthropic / OpenAI | 按请求协议返回单个映射模型 |
 
 不认识的路径会直接返回 `400`，不会盲目转发到上游。
+
+模型列表只返回启用的具体映射，通配规则和兜底 `*` 不会作为模型名返回。供应商弹窗拉取模型成功时，
+会用上游最新列表替换当前模型组；仍存在的同名模型保留已配置的上下文窗口和能力，已下线模型会移除。
 
 ## 日志与用量
 

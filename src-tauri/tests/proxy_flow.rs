@@ -482,14 +482,23 @@ async fn end_to_end_models_endpoint_is_intercepted() {
     let (mock_port, mock_stop) = mock_upstream(captured.clone(), |_| Response::new(Body::from("nope"))).await;
     let dir = TempDir::new("ccproxy-e2e");
     let config = json!({
-        "protocols": [{
-            "id": "anthropic", "name": "Anthropic", "enabled": true,
-            "providers": [{ "id": "p1", "enabled": true, "baseUrl": format!("http://127.0.0.1:{mock_port}"), "token": "t", "models": [] }],
-            "mappings": [
-                { "id": "m1", "enabled": true, "clientModel": "claude-opus-4", "providerId": "p1", "realModel": "glm-4.6" },
-                { "id": "m2", "enabled": true, "clientModel": "*", "providerId": "p1", "realModel": "glm-4.6" }
-            ]
-        }]
+        "protocols": [
+            {
+                "id": "anthropic", "name": "Anthropic", "enabled": true,
+                "providers": [{ "id": "p1", "enabled": true, "baseUrl": format!("http://127.0.0.1:{mock_port}"), "token": "t", "models": [] }],
+                "mappings": [
+                    { "id": "m1", "enabled": true, "clientModel": "claude-opus-4", "providerId": "p1", "realModel": "glm-4.6" },
+                    { "id": "m2", "enabled": true, "clientModel": "*", "providerId": "p1", "realModel": "glm-4.6" }
+                ]
+            },
+            {
+                "id": "openai", "name": "OpenAI", "enabled": true,
+                "providers": [{ "id": "q1", "enabled": true, "baseUrl": format!("http://127.0.0.1:{mock_port}"), "token": "t", "models": ["real-codex"] }],
+                "mappings": [
+                    { "id": "m3", "enabled": true, "clientModel": "codex-model", "providerId": "q1", "realModel": "real-codex" }
+                ]
+            }
+        ]
     });
     let state = test_state(config_with_port(config, 0), &dir);
     let port = start_proxy(&state).await;
@@ -513,6 +522,25 @@ async fn end_to_end_models_endpoint_is_intercepted() {
     let response = client.get(format!("http://127.0.0.1:{port}/v1/models")).send().await.unwrap();
     let payload: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
     assert_eq!(payload["object"], json!("list"));
+
+    let response = client
+        .get(format!("http://127.0.0.1:{port}/v1/models?limit=1000"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let payload: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+    assert_eq!(payload["data"][0]["type"], json!("model"));
+
+    let response = client
+        .get(format!("http://127.0.0.1:{port}/v1/models?client_version=0.165.0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let payload: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+    assert_eq!(payload["models"][0]["slug"], json!("codex-model"));
+    assert!(payload.get("data").is_none());
 
     state.proxy.stop().await;
     let _ = mock_stop.send(());

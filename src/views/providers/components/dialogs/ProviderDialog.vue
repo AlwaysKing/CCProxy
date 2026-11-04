@@ -4,6 +4,7 @@ import { computed, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/useConfigStore'
 import { BaseButton, BaseDialog, BaseInput, FormField, IconButton } from '@/components/base'
 import { newId } from '@/utils/id'
+import { replaceFetchedModels } from './providerModels.mjs'
 
 const props = defineProps({
   modelValue: {
@@ -193,13 +194,7 @@ async function fetchGroupModels(group) {
   if (result.models.length === 0) {
     throw new Error('上游没有返回任何模型')
   }
-  const existing = new Set(group.models.map((row) => row.name.trim()).filter(Boolean))
-  group.models = group.models.filter((row) => row.name.trim())
-  for (const name of result.models) {
-    if (existing.has(name)) continue
-    group.models.push(emptyModel())
-    group.models[group.models.length - 1].name = name
-  }
+  group.models = replaceFetchedModels(group.models, result.models)
 }
 
 async function onFetchModels() {

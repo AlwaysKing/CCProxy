@@ -395,12 +395,13 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
 
     // 模型列表接口由代理接管：不透传上游，按当前激活的映射直接生成响应
     if let Some(models_request) = match_models_request(method.as_str(), &path) {
-        let protocol_id = resolve_client_protocol(&headers);
+        let protocol_id = resolve_client_protocol(&headers, &path);
+        let log_protocol_id = if protocol_id == "codex" { "openai_responses" } else { protocol_id };
         let (status, payload) = {
             let Ok(config) = state.config.read() else {
                 return json_response(500, &json!({ "error": { "type": "ccproxy_internal", "message": "配置不可读" } }));
             };
-            build_models_response(&config, &protocol_id, models_request.model_id.as_deref())
+            build_models_response(&config, protocol_id, models_request.model_id.as_deref())
         };
         let entry = make_log_entry(
             &id,
@@ -408,7 +409,7 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
             method.as_str(),
             &path,
             LogFields {
-                protocol: Some(protocol_id),
+                protocol: Some(log_protocol_id.to_string()),
                 client_model: models_request.model_id.clone(),
                 status_code: status,
                 outcome: "models".to_string(),

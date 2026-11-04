@@ -1,11 +1,12 @@
 // 模型列表接口接管：GET /v1/models 与 GET /v1/models/{id} 不透传上游，
 // 由代理按当前激活的映射表直接生成响应，客户端看到的就是本代理实际可路由的模型名。
-// 这条路径两个协议完全相同，光看路径分不出客户端是哪一类，只能按请求头判定：
-// 带 anthropic-version 或 x-api-key 视为 Anthropic 客户端，否则按 OpenAI 处理。
+// OpenAI Chat、Claude Code 与 Codex 共用路径，按官方客户端参数和请求头分流：
+// client_version -> Codex，limit=1000 或 Anthropic 请求头 -> Claude，其余 -> OpenAI Chat。
 
 use axum::http::HeaderMap;
 use serde_json::{json, Value};
 
+use crate::clients::catalog::{build_catalog_entry, expected_catalog_entries};
 use crate::config::{AppConfig, Protocol, Provider};
 
 // 与 router 的可用性口径一致：映射启用、供应商存在且启用才算可路由。
@@ -82,12 +83,31 @@ pub fn match_models_request(method: &str, path: &str) -> Option<ModelsRequest> {
     Some(ModelsRequest { model_id: Some(percent_decode(id)) })
 }
 
-// 按请求头判定客户端类型
-pub fn resolve_client_protocol(headers: &HeaderMap) -> String {
+// 按官方模型发现参数判定客户端类型。查询参数优先于请求头，避免 Claude Code
+// 同时携带 Anthropic 请求头和 client_version 时被误判。
+pub fn resolve_client_protocol(headers: &HeaderMap, path: &str) -> &'static str {
+    let mut has_client_version = false;
+    let mut has_claude_limit = false;
+    if let Some((_, query)) = path.split_once('?') {
+        for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+            if key == "client_version" && !value.trim().is_empty() {
+                has_client_version = true;
+            }
+            if key == "limit" && value == "1000" {
+                has_claude_limit = true;
+            }
+        }
+    }
+    if has_client_version {
+        return "codex";
+    }
+    if has_claude_limit {
+        return "anthropic";
+    }
     if headers.contains_key("anthropic-version") || headers.contains_key("x-api-key") {
-        "anthropic".to_string()
+        "anthropic"
     } else {
-        "openai_chat".to_string()
+        "openai_chat"
     }
 }
 
@@ -115,10 +135,11 @@ fn build_not_found_payload(protocol_id: &str, model_id: &str) -> Value {
 
 // 生成响应入口。返回 (status, payload)，由调用方序列化写出
 pub fn build_models_response(config: &AppConfig, protocol_id: &str, model_id: Option<&str>) -> (u16, Value) {
-    let Some(protocol) = config.protocol(protocol_id) else {
+    let mapping_protocol_id = if protocol_id == "codex" { "openai_responses" } else { protocol_id };
+    let Some(protocol) = config.protocol(mapping_protocol_id) else {
         return (
             404,
-            json!({ "error": { "type": "protocol_not_found", "message": format!("配置中不存在协议 {protocol_id}") } }),
+            json!({ "error": { "type": "protocol_not_found", "message": format!("配置中不存在协议 {mapping_protocol_id}") } }),
         );
     };
     if !protocol.enabled {
@@ -129,6 +150,18 @@ pub fn build_models_response(config: &AppConfig, protocol_id: &str, model_id: Op
     }
 
     let names = usable_client_models(protocol, &config.providers);
+
+    if protocol_id == "codex" {
+        let entries = expected_catalog_entries(Some(protocol), &config.providers);
+        if let Some(model_id) = model_id {
+            let Some(entry) = entries.iter().find(|entry| entry.name == model_id) else {
+                return (404, build_not_found_payload(protocol_id, model_id));
+            };
+            return (200, build_catalog_entry(entry));
+        }
+        let models: Vec<Value> = entries.iter().map(build_catalog_entry).collect();
+        return (200, json!({ "models": models }));
+    }
 
     // 单模型查询：列表里有就返回单项，没有返回协议各自的 404 形态
     if let Some(model_id) = model_id {

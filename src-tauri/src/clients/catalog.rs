@@ -378,6 +378,10 @@ fn build_new_entry(want: &ExpectedEntry, template: Option<&Value>) -> Value {
     Value::Object(entry)
 }
 
+pub(crate) fn build_catalog_entry(want: &ExpectedEntry) -> Value {
+    build_new_entry(want, None)
+}
+
 fn to_string_pretty_with(value: &Value, unit: &str) -> String {
     let mut buffer = Vec::new();
     let formatter = serde_json::ser::PrettyFormatter::with_indent(unit.as_bytes());
