@@ -45,7 +45,7 @@ function formatLabel(apiFormat) {
 
 function modelListLabel(apiFormat) {
   if (apiFormat === 'anthropic') return 'Claude 模型列表'
-  if (apiFormat === 'openai') return 'OpenAI 模型列表'
+  if (apiFormat === 'openai') return 'OpenAI / Codex 模型列表'
   return `${apiFormat} 模型列表`
 }
 
@@ -285,7 +285,7 @@ async function onConfirm() {
         <div>
           <h3 class="models-title">模型列表</h3>
           <p class="models-desc">
-            点击一次拉取，会分别按 Claude 与 OpenAI 两种协议请求上游并更新对应模型列表。
+            点击一次拉取，会分别按 Claude 与 OpenAI / Codex 的模型发现协议请求上游并更新对应模型列表。
           </p>
         </div>
         <BaseButton

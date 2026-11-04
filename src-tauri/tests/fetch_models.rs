@@ -77,7 +77,7 @@ async fn fetch_models_parses_dedupes_and_injects_anthropic_auth() {
 
     let entries = captured.lock().unwrap();
     let (url, headers) = entries.last().unwrap();
-    assert_eq!(url, "/v1/models");
+    assert_eq!(url, "/v1/models?limit=1000");
     assert_eq!(headers["x-api-key"], "sk-real");
     assert_eq!(headers["anthropic-version"], "2023-06-01");
     drop(entries);
@@ -103,11 +103,73 @@ async fn fetch_models_uses_bearer_and_dedupes_version_segment() {
     assert_eq!(result["models"], json!(["gpt-4o"]));
 
     let entries = captured.lock().unwrap();
-    let (url, headers) = entries.last().unwrap();
-    // baseUrl 已带 /v1，路径里的 /v1 要去重
-    assert_eq!(url, "/v1/models");
+    let urls: Vec<&str> = entries.iter().map(|(url, _)| url.as_str()).collect();
+    assert_eq!(
+        urls,
+        [
+            "/v1/models",
+            &format!("/v1/models?client_version={}", env!("CARGO_PKG_VERSION"))
+        ]
+    );
+    // baseUrl 已带 /v1，两个请求路径里的 /v1 都要去重
+    let (_, headers) = &entries[0];
     assert_eq!(headers["authorization"], "Bearer sk-real");
     assert!(headers.get("x-api-key").is_none());
+    drop(entries);
+    let _ = stop.send(());
+}
+
+#[tokio::test]
+async fn fetch_models_openai_group_includes_codex_catalog_models() {
+    let captured = sink();
+    let captured_for_mock = captured.clone();
+    let app = Router::new().fallback(any(move |request: axum::extract::Request| {
+        let sink = captured_for_mock.clone();
+        async move {
+            let url = request
+                .uri()
+                .path_and_query()
+                .map(|value| value.as_str().to_string())
+                .unwrap_or_default();
+            if let Ok(mut entries) = sink.lock() {
+                entries.push((url.clone(), request.headers().clone()));
+            }
+            let payload = if request.uri().query().is_some() {
+                json!({ "models": [
+                    { "slug": "chat-model" },
+                    { "slug": "codex-only" }
+                ] })
+            } else {
+                json!({ "data": [{ "id": "chat-model" }] })
+            };
+            Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                .unwrap()
+        }
+    }));
+    let (port, stop) = start_mock(app).await;
+
+    let client = reqwest::Client::new();
+    let result = fetch_upstream_models(
+        &client,
+        &json!({ "apiFormat": "openai", "baseUrl": format!("http://127.0.0.1:{port}"), "token": "sk-real" }),
+    )
+    .await;
+
+    assert_eq!(result["ok"], json!(true));
+    assert_eq!(result["models"], json!(["chat-model", "codex-only"]));
+
+    let entries = captured.lock().unwrap();
+    let urls: Vec<&str> = entries.iter().map(|(url, _)| url.as_str()).collect();
+    assert_eq!(
+        urls,
+        [
+            "/v1/models",
+            &format!("/v1/models?client_version={}", env!("CARGO_PKG_VERSION"))
+        ]
+    );
     drop(entries);
     let _ = stop.send(());
 }
