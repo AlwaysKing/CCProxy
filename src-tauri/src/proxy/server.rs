@@ -37,6 +37,7 @@ fn next_request_id(started_at: i64) -> String {
 #[derive(Default, Clone)]
 struct LogFields {
     protocol: Option<String>,
+    upstream_protocol: Option<String>,
     client_model: Option<String>,
     match_kind: Option<String>,
     matched_rule: Option<String>,
@@ -62,6 +63,7 @@ fn make_log_entry(id: &str, started_at: i64, method: &str, path: &str, fields: L
         "method": method,
         "path": path,
         "protocol": fields.protocol,
+        "upstreamProtocol": fields.upstream_protocol,
         "clientModel": fields.client_model,
         "matchKind": fields.match_kind,
         "matchedRule": fields.matched_rule,
@@ -508,6 +510,7 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
             &path,
             LogFields {
                 protocol: Some(protocol_id.to_string()),
+                upstream_protocol: Some(upstream_format.clone()),
                 client_model: Some(client_model.clone()),
                 provider_id: Some(route.provider_id.clone()),
                 provider_name: Some(route.provider_name.clone()),
@@ -541,6 +544,7 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
                         &path,
                         LogFields {
                             protocol: Some(protocol_id.to_string()),
+                            upstream_protocol: Some(upstream_format.clone()),
                             client_model: Some(client_model.clone()),
                             provider_id: Some(route.provider_id.clone()),
                             provider_name: Some(route.provider_name.clone()),
@@ -599,6 +603,7 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
             route.provider_name.clone(),
             route.real_model.clone(),
         );
+        let upstream_protocol = upstream_format.clone();
         Arc::new(move |outcome: ForwardOutcome, tokens: Option<Value>| {
             let entry = make_log_entry(
                 &id,
@@ -607,6 +612,7 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
                 &path,
                 LogFields {
                     protocol: Some(protocol_id.to_string()),
+                    upstream_protocol: Some(upstream_protocol.clone()),
                     client_model: Some(client_model.clone()),
                     match_kind: Some(route.0.clone()),
                     matched_rule: Some(route.1.clone()),
@@ -824,6 +830,7 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
                         &path,
                         LogFields {
                             protocol: Some(protocol_id.to_string()),
+                            upstream_protocol: Some(upstream_format.clone()),
                             client_model: Some(client_model.clone()),
                             provider_id: Some(route.provider_id.clone()),
                             provider_name: Some(route.provider_name.clone()),
@@ -962,4 +969,3 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
     }
     builder.body(Body::from(out)).unwrap_or_else(|_| Response::new(Body::empty()))
 }
-

@@ -181,6 +181,8 @@ async fn anthropic_client_uses_an_openai_chat_upstream() {
 
     // 日志里带上了 token 统计
     let entry = entry_value(&state, 0);
+    assert_eq!(entry["protocol"], json!("anthropic"));
+    assert_eq!(entry["upstreamProtocol"], json!("openai_chat"));
     assert_eq!(entry["tokens"]["input"], json!(11));
     assert_eq!(entry["tokens"]["output"], json!(3));
 
@@ -328,6 +330,7 @@ async fn count_tokens_is_answered_locally_when_the_upstream_is_not_anthropic() {
 
     let entry = entry_value(&state, 0);
     assert_eq!(entry["outcome"], json!("count_tokens_local"));
+    assert_eq!(entry["upstreamProtocol"], json!("openai_chat"));
 
     state.proxy.stop().await;
     let _ = mock_stop.send(());

@@ -80,7 +80,7 @@ CCProxy/
 3. **查表（router.js）**：读 body.model → 该协议映射表，精确 > 通配（最长前缀优先）> 兜底 `*`；逐层检查启停（协议停 → 503；供应商/映射停 → 该条不可用走下一优先级）；全未命中 → 404「模型 x 未在 y 协议映射表中配置」
 4. **适配（adapters.js）**：按上游协议注入认证（anthropic → `x-api-key`；openai → `Authorization: Bearer`）；model 改写两协议均在 body 顶层；固定剥离入站 `authorization / x-api-key / api-key / x-goog-api-key / proxy-authorization` + hop-by-hop
 5. **转发（upstream.js）**：baseUrl + 剩余路径（去重复 `/v1` 段）；SSE 边收边写；超时三档（首字节 60s / 流空闲 120s / 非流式 600s）；上游错误原样透传
-6. **回传埋点**：anthropic 从 `message_start.usage` + `message_delta.usage` 累加，openai 从 `usage` 字段取；写 JSONL：时间、协议、clientModel、命中规则、目标供应商、真实 model、状态码、耗时、tokens
+6. **回传埋点**：anthropic 从 `message_start.usage` + `message_delta.usage` 累加，openai 从 `usage` 字段取；写 JSONL：时间、客户端协议、原始协议（`upstreamProtocol`，实际发给上游的线格式）、clientModel、命中规则、目标供应商、真实 model、状态码、耗时、tokens
 
 ## 配置文件（~/.ccproxy/app.json）
 
@@ -113,7 +113,7 @@ CCProxy/
 | 页面 | 内容 |
 |---|---|
 | 供应商（主页） | 顶栏协议 Tabs → 映射表（clientModel / 目标供应商+真实模型 / 通配标识 / 启停 / 增删改）→ 供应商行（名称、baseUrl、模型编号、启停开关、编辑/删除）；`+` 弹窗添加供应商（名称、baseUrl、token、模型列表）。供应商行不可点：它不参与路由 |
-| 请求日志 | 最近请求：时间、协议、clientModel → 命中规则 → 目标供应商/真实模型、状态码、耗时、tokens；按协议/状态码过滤；点开看识别打分明细；内存 500 条 + 落盘全量 |
+| 请求日志 | 最近请求：时间、客户端协议、clientModel → 命中规则 → 目标供应商 → 原始协议（实际发给上游的线格式）→ 真实模型、状态码、耗时、tokens；按协议/状态码过滤；点开看识别打分明细；内存 500 条 + 落盘全量 |
 | 用量统计 | 按天/供应商/模型聚合 tokens（输入/输出）、请求数、失败数；模型级可配单价，未配只显 tokens |
 | 设置 | 端口（改完自动重启代理）、开机自启、日志清理 |
 | 托盘 | 图标含运行状态点；菜单：端口状态、打开主窗口、启停代理、退出；关窗口不退出 |

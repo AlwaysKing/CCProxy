@@ -70,6 +70,10 @@ function protocolLabel(entry) {
   return PROTOCOL_LABELS[entry.protocol] || '未识别'
 }
 
+function upstreamProtocolLabel(entry) {
+  return PROTOCOL_LABELS[entry.upstreamProtocol] || '—'
+}
+
 const filtered = computed(() =>
   logsStore.entries.filter((entry) => {
     if (protocolFilter.value !== 'all' && entry.protocol !== protocolFilter.value) return false
@@ -93,11 +97,12 @@ const detailRows = computed(() => {
   return [
     { label: '时间', value: formatDateTime(entry.timestamp) },
     { label: '请求', value: `${entry.method || '—'} ${entry.path || ''}`.trim(), mono: true },
-    { label: '协议', value: protocolLabel(entry) },
+    { label: '客户端协议', value: protocolLabel(entry) },
     { label: '结果', value: OUTCOME_LABELS[entry.outcome] || entry.outcome },
     { label: '映射模型', value: entry.clientModel || '—', mono: true },
     { label: '命中规则', value: entry.matchedRule ? `${rule ? rule.label : '命中'} ${entry.matchedRule}` : '—', mono: !!entry.matchedRule },
     { label: '供应商', value: entry.providerName ? `${entry.providerName}（${entry.providerId}）` : '—' },
+    { label: '原始协议', value: upstreamProtocolLabel(entry) },
     { label: '原始模型', value: entry.realModel || '—', mono: true },
     { label: '状态码', value: String(entry.statusCode || '—') },
     { label: '耗时', value: formatDuration(entry.durationMs) },
@@ -153,9 +158,10 @@ onUnmounted(() => {
         <thead>
           <tr>
             <th>时间</th>
-            <th>协议</th>
+            <th>客户端协议</th>
             <th>映射模型</th>
             <th>供应商</th>
+            <th>原始协议</th>
             <th>原始模型</th>
             <th>状态</th>
             <th class="col-num">耗时</th>
@@ -182,6 +188,11 @@ onUnmounted(() => {
             <td>
               <span v-if="entry.providerName">{{ entry.providerName }}</span>
               <span v-else class="cell-empty">—</span>
+            </td>
+            <td>
+              <span class="cell-protocol" :class="{ muted: !entry.upstreamProtocol }">
+                {{ upstreamProtocolLabel(entry) }}
+              </span>
             </td>
             <td>
               <code v-if="entry.realModel" class="cell-real">{{ entry.realModel }}</code>
